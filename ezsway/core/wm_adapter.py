@@ -6,7 +6,7 @@ from typing import List
 import i3ipc
 import sys
 
-from .errors import WMCommandError
+from .errors import WMCommandError, WMNotSupportedError
 
 VALID_TRANSFORMS = {
     "normal", "90", "180", "270",
@@ -92,7 +92,16 @@ class SwayAdapter(WMAdapter):
             # Fallback to swaymsg if IPC fails (unlikely if Sway is running)
             return self._get_outputs_fallback()
 
-        outputs = self.ipc.get_outputs()
+        try:
+            outputs = self.ipc.get_outputs()
+        except Exception as e:
+            # The IPC connection can drop/error mid-session (socket closed,
+            # sway restarted, etc.) well after a successful __init__ -- this
+            # used to be completely unguarded, unlike every other IPC call
+            # path in this class, producing a raw traceback instead of a
+            # catchable WMCommandError.
+            raise WMCommandError(f"Failed to query sway outputs via IPC: {e}") from e
+
         monitors = []
         for out in outputs:
             # i3ipc output object attributes might vary slightly,
@@ -208,22 +217,28 @@ class SwayAdapter(WMAdapter):
 class HyprlandAdapter(WMAdapter):
     """Hyprland implementation of WMAdapter (Stub/Basic) -- NOT YET FUNCTIONAL.
 
-    Intentionally raises NotImplementedError from WMFactory rather than being
-    instantiated silently; see WMFactory.create_adapter().
+    Intentionally raises WMNotSupportedError from WMFactory rather than being
+    instantiated silently; see WMFactory.create_adapter(). Methods here also
+    raise WMNotSupportedError (not bare NotImplementedError) in case this
+    class is ever instantiated directly, bypassing the factory -- callers
+    throughout this codebase catch `EzSwayError`, and a bare
+    NotImplementedError wouldn't be caught by that, producing an unhandled
+    traceback instead of the clean error message every other failure path
+    here promises.
     """
 
     def get_outputs(self) -> List[Monitor]:
         # TODO: Implement hyprctl monitors -j parsing
-        raise NotImplementedError("Hyprland support is not yet implemented")
+        raise WMNotSupportedError("Hyprland support is not yet implemented")
 
     def enable_output(self, monitor_name: str, mode: str, position: str,
                        scale: float = 1.0, transform: str = "normal"):
         # TODO: hyprctl keyword monitor ...
-        raise NotImplementedError("Hyprland support is not yet implemented")
+        raise WMNotSupportedError("Hyprland support is not yet implemented")
 
     def disable_output(self, monitor_name: str):
         # TODO: hyprctl keyword monitor ... disabled
-        raise NotImplementedError("Hyprland support is not yet implemented")
+        raise WMNotSupportedError("Hyprland support is not yet implemented")
 
     def reload_config(self):
         result = subprocess.run(["hyprctl", "reload"], capture_output=True, text=True)
@@ -245,7 +260,7 @@ class WMFactory:
             # instead of handing back a stub that silently no-ops every call
             # (a Hyprland user previously got an empty monitor list and no
             # error at all, despite the README claiming WM-agnostic support).
-            raise NotImplementedError(
+            raise WMNotSupportedError(
                 "Hyprland support is not yet implemented (architecture is in "
                 "place in wm_adapter.HyprlandAdapter, but get_outputs/enable_output/"
                 "disable_output are unfinished). Falling back to Sway would be wrong "

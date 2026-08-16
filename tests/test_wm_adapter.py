@@ -6,7 +6,7 @@ import os
 sys.path.append(os.getcwd())
 
 from ezsway.core.wm_adapter import SwayAdapter, WMFactory, HyprlandAdapter
-from ezsway.core.errors import WMCommandError
+from ezsway.core.errors import WMCommandError, WMNotSupportedError
 
 
 class TestSwayAdapterCommandChecking(unittest.TestCase):
@@ -49,6 +49,15 @@ class TestSwayAdapterCommandChecking(unittest.TestCase):
         with self.assertRaises(WMCommandError):
             self.adapter.disable_output("DP-1")
 
+    def test_get_outputs_ipc_exception_wrapped_as_wmcommanderror(self):
+        """Regression test: get_outputs()'s primary i3ipc path used to have
+        NO exception handling at all (unlike enable/disable_output), so a
+        socket drop mid-session raised a raw, uncatchable exception straight
+        through every caller (GUI timer, TUI, CLI)."""
+        self.adapter.ipc.get_outputs.side_effect = RuntimeError("broken pipe")
+        with self.assertRaises(WMCommandError):
+            self.adapter.get_outputs()
+
 
 class TestWMFactoryHyprland(unittest.TestCase):
     """Regression test: previously a detected Hyprland session silently got a
@@ -56,19 +65,23 @@ class TestWMFactoryHyprland(unittest.TestCase):
     It must now raise clearly instead."""
 
     def test_hyprland_detected_raises_not_implemented(self):
+        # Must be an EzSwayError subclass (WMNotSupportedError), not a bare
+        # NotImplementedError -- every caller in this codebase catches
+        # `except EzSwayError`, which a bare NotImplementedError would slip
+        # past, producing an unhandled traceback instead of a clean message.
         with patch.dict(os.environ, {"HYPRLAND_INSTANCE_SIGNATURE": "abc123"}, clear=False):
             with patch.dict(os.environ, {}, clear=False):
                 os.environ.pop("SWAYSOCK", None)
-                with self.assertRaises(NotImplementedError):
+                with self.assertRaises(WMNotSupportedError):
                     WMFactory.create_adapter()
 
     def test_hyprland_adapter_methods_raise_not_implemented(self):
         adapter = HyprlandAdapter()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(WMNotSupportedError):
             adapter.get_outputs()
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(WMNotSupportedError):
             adapter.enable_output("m1", "1920x1080", "0 0")
-        with self.assertRaises(NotImplementedError):
+        with self.assertRaises(WMNotSupportedError):
             adapter.disable_output("m1")
 
 

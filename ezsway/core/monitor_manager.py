@@ -1,7 +1,7 @@
 from typing import List
 from .wm_adapter import WMFactory, WMAdapter, Monitor
 from .config_store import ConfigStore
-from .errors import WMCommandError
+from .errors import ConfigStoreError, MonitorNotFoundError, WMCommandError
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -83,7 +83,13 @@ class MonitorManager:
                         "active": True,
                         "mode": f"{m.width}x{m.height}",
                     })
-                except WMCommandError as e:
+                except (WMCommandError, ConfigStoreError) as e:
+                    # ConfigStoreError (e.g. disk full/permission denied on
+                    # monitors.json) used to be uncaught here, since this
+                    # branch only handled WMCommandError -- it would
+                    # propagate out of enforce_policy() entirely, skipping
+                    # step 3 below and leaving other unknown monitors
+                    # active, violating the policy's own "default deny".
                     logger.error(f"Fail-safe activation of {m.name} failed: {e}")
                 else:
                     unknown_monitors.remove(m)
@@ -115,8 +121,13 @@ class MonitorManager:
             target = next((m for m in self.monitors if m.unique_id == unique_id), None)
 
         if not target:
-            logger.error(f"Cannot activate {unique_id}: Monitor not found connected.")
-            return
+            # Previously logged and silently returned, contradicting this
+            # method's own docstring ("Raises ... on failure -- callers must
+            # catch and surface these, not assume success"). A caller
+            # wrapping this in try/except EzSwayError (as MainWindow does)
+            # saw no exception and no error dialog -- the click just did
+            # nothing, with no feedback at all.
+            raise MonitorNotFoundError(f"Cannot activate {unique_id!r}: monitor not connected.")
 
         config = {
             "active": True,
@@ -147,8 +158,7 @@ class MonitorManager:
             target = next((m for m in self.monitors if m.unique_id == unique_id), None)
 
         if not target:
-            logger.error(f"Cannot deactivate {unique_id}: Monitor not found connected.")
-            return
+            raise MonitorNotFoundError(f"Cannot deactivate {unique_id!r}: monitor not connected.")
 
         self.wm.disable_output(target.name)
         self.config_store.set_monitor_config(unique_id, {"active": False})

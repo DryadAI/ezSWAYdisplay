@@ -214,50 +214,82 @@ class ProfileManager:
         "success:true but nothing actually changed" failure mode this tool
         was built to catch.
         """
-        data = self._load_profile_file(label)
         result = LoadResult()
 
-        connected = {m.unique_id: m for m in self.wm.get_outputs()}
+        with self._locked():
+            data = self._load_profile_file(label)
+            connected = {m.unique_id: m for m in self.wm.get_outputs()}
 
-        for entry in data.get("outputs", []):
-            uid = entry["unique_id"]
-            live = connected.get(uid)
-            if live is None:
-                result.skipped_not_connected.append(uid)
-                continue
-
-            if not entry.get("active", True):
+            for entry in data.get("outputs", []):
                 try:
-                    self.wm.disable_output(live.name)
-                    result.applied.append(uid)
-                except WMCommandError as e:
+                    uid = entry["unique_id"]
+                except (KeyError, TypeError) as e:
+                    # A hand-edited or future/older-schema profile could be
+                    # missing required keys -- previously this raised a raw
+                    # KeyError past every `except EzSwayError` handler in the
+                    # GUI/TUI/CLI. Record it as a failure instead of crashing.
+                    result.failed.append({"unique_id": "?", "error": f"Malformed profile entry: {e}"})
+                    continue
+
+                live = connected.get(uid)
+                if live is None:
+                    result.skipped_not_connected.append(uid)
+                    continue
+
+                if not entry.get("active", True):
+                    try:
+                        self.wm.disable_output(live.name)
+                        result.applied.append(uid)
+                    except WMCommandError as e:
+                        result.failed.append({"unique_id": uid, "error": str(e)})
+                    continue
+
+                try:
+                    mode_wh = entry["mode"].split("@")[0]  # "WxH@RRR.RRRHz" -> "WxH"
+                except (KeyError, TypeError) as e:
+                    result.failed.append({"unique_id": uid, "error": f"Malformed profile entry: {e}"})
+                    continue
+
+                try:
+                    self.wm.enable_output(
+                        live.name,
+                        mode=mode_wh,
+                        position=entry.get("position", "0 0"),
+                        scale=entry.get("scale", 1.0),
+                        transform=entry.get("transform", "normal"),
+                    )
+                except (WMCommandError, ValueError) as e:
                     result.failed.append({"unique_id": uid, "error": str(e)})
-                continue
+                    continue
 
-            mode_wh = entry["mode"].split("@")[0]  # "WxH@RRR.RRRHz" -> "WxH"
-            try:
-                self.wm.enable_output(
-                    live.name,
-                    mode=mode_wh,
-                    position=entry.get("position", "0 0"),
-                    scale=entry.get("scale", 1.0),
-                    transform=entry.get("transform", "normal"),
-                )
-            except (WMCommandError, ValueError) as e:
-                result.failed.append({"unique_id": uid, "error": str(e)})
-                continue
+                if self._verify_applied(uid, entry):
+                    result.applied.append(uid)
+                else:
+                    result.failed.append({
+                        "unique_id": uid,
+                        "error": "Command accepted but output did not reach the requested "
+                                 "mode/position (verified after re-query).",
+                    })
 
-            if self._verify_applied(uid, entry):
-                result.applied.append(uid)
-            else:
-                result.failed.append({
-                    "unique_id": uid,
-                    "error": "Command accepted but output did not reach the requested "
-                             "mode/position (verified after re-query).",
-                })
+            # Only claim this profile as "active" if it fully applied --
+            # otherwise .current would point at a label whose real state on
+            # screen doesn't match what was saved. Written atomically like
+            # every other file this class touches (a crash mid-write must
+            # never leave .current truncated/corrupted).
+            if result.ok:
+                self._write_atomic_text(self.current_path, label)
 
-        self.current_path.write_text(label)
         return result
+
+    def _write_atomic_text(self, path: Path, text: str):
+        tmp = path.with_name(f".{path.name}.tmp")
+        try:
+            tmp.write_text(text)
+            tmp.replace(path)
+        finally:
+            if tmp.exists():
+                with contextlib.suppress(OSError):
+                    tmp.unlink()
 
     def _verify_applied(self, unique_id: str, entry: dict) -> bool:
         want_wh = entry["mode"].split("@")[0]
@@ -293,6 +325,7 @@ class ProfileManager:
             logger.info("Renamed profile %r -> %r", old, new)
 
     def remove_profile(self, label: str) -> None:
+        label = validate_label(label)
         with self._locked():
             self._check_not_locked(label)
             path = self._profile_path(label)
@@ -305,18 +338,21 @@ class ProfileManager:
             logger.info("Removed profile %r", label)
 
     def lock_profile(self, label: str) -> None:
+        label = validate_label(label)
         with self._locked():
             data = self._load_profile_file(label)
             data["locked"] = True
             self._write_atomic(self._profile_path(label), data)
 
     def unlock_profile(self, label: str) -> None:
+        label = validate_label(label)
         with self._locked():
             data = self._load_profile_file(label)
             data["locked"] = False
             self._write_atomic(self._profile_path(label), data)
 
     def backup_profile(self, label: str) -> str:
+        label = validate_label(label)
         with self._locked():
             src = self._profile_path(label)
             if not src.exists():
@@ -338,6 +374,11 @@ class ProfileManager:
         Refuses if the live profile currently exists and is locked (restoring
         over a locked profile would be a silent, unwanted mutation).
         """
+        # backup_id becomes a filename below (backups_dir/<backup_id>.json) --
+        # same path-traversal exposure as a profile label, so it gets the
+        # same character-safety validation (a backup_id is always
+        # "<label>__<timestamp>", which satisfies this charset).
+        backup_id = validate_label(backup_id)
         with self._locked():
             src = self.backups_dir / f"{backup_id}.json"
             if not src.exists():
@@ -345,7 +386,7 @@ class ProfileManager:
             data = self._read_profile_raw(src)
             if data is None:
                 raise ProfileNotFoundError(f"Backup {backup_id!r} is corrupted.")
-            label = data.get("label") or backup_id.rsplit("__", 1)[0]
+            label = validate_label(data.get("label") or backup_id.rsplit("__", 1)[0])
             self._check_not_locked(label)
             self._write_atomic(self._profile_path(label), data)
             logger.info("Restored backup %r -> profile %r", backup_id, label)

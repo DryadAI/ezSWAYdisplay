@@ -179,15 +179,19 @@ def main():
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.tui:
-        cmd_tui(args)
-        return
-    if args.command is None or args.gui:
-        cmd_gui(args)
-        return
-
+    # All three paths (TUI/GUI/CLI subcommand) go through the same
+    # try/except now -- previously cmd_tui/cmd_gui ran *before* this block,
+    # so e.g. a Hyprland user (WMFactory.create_adapter() raising
+    # WMNotSupportedError during MainWindow()/SetupWizard construction) got
+    # a raw traceback instead of the clean "Error: ..." message every CLI
+    # subcommand already had.
     try:
-        args.func(args)
+        if args.tui:
+            cmd_tui(args)
+        elif args.command is None or args.gui:
+            cmd_gui(args)
+        else:
+            args.func(args)
     except EzSwayError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)

@@ -51,7 +51,12 @@ class MainWindow(QMainWindow):
         self.profile_panel.on_open_arrange_canvas.connect(self.open_arrange_canvas)
         tabs.addTab(self.profile_panel, "Saved Layouts")
 
-        self.run_policy()
+        # Deferred to right after the event loop starts (and the window has
+        # painted) instead of calling it synchronously here -- this used to
+        # block the *first paint* of the window on WM IPC, a stronger version
+        # of the already-documented 5s-timer blocking-I/O limitation below,
+        # but happening before the user sees anything at all.
+        QTimer.singleShot(0, self.run_policy)
 
         # Timer for auto-refresh/check (every 5 seconds)
         # Known limitation (tracked, not fixed here): this does blocking I/O
@@ -112,18 +117,31 @@ class MainWindow(QMainWindow):
         self.scroll_layout.addStretch()
 
     def activate_monitor(self, unique_id):
+        # Mutation and refresh are wrapped separately -- previously one
+        # try/except covered both, so a failure in the *refresh* that
+        # happened after a *successful* activation was misreported as
+        # "Failed to activate", potentially prompting a confusing retry that
+        # double-toggles state which had already changed.
         try:
             self.manager.activate_monitor(unique_id)
-            self.refresh_list()
         except EzSwayError as e:
             QMessageBox.warning(self, "Error", f"Failed to activate: {e}")
+            return
+        try:
+            self.refresh_list()
+        except EzSwayError as e:
+            QMessageBox.warning(self, "Error", f"Activated, but failed to refresh the display list: {e}")
 
     def deactivate_monitor(self, unique_id):
         try:
             self.manager.deactivate_monitor(unique_id)
-            self.refresh_list()
         except EzSwayError as e:
             QMessageBox.warning(self, "Error", f"Failed to deactivate: {e}")
+            return
+        try:
+            self.refresh_list()
+        except EzSwayError as e:
+            QMessageBox.warning(self, "Error", f"Deactivated, but failed to refresh the display list: {e}")
 
     def configure_monitor(self, unique_id):
         """Opens the native drag-and-drop arrangement canvas.

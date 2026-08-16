@@ -8,6 +8,7 @@ sys.path.append(os.getcwd())
 
 from ezsway.core.monitor_manager import MonitorManager
 from ezsway.core.wm_adapter import Monitor
+from ezsway.core.errors import MonitorNotFoundError
 
 class TestMonitorManager(unittest.TestCase):
     
@@ -95,6 +96,20 @@ class TestMonitorManager(unittest.TestCase):
 
         self.mock_wm.disable_output.assert_called_once_with("DP-1")
         self.mock_store.set_monitor_config.assert_called_with(m1.unique_id, {"active": False})
+
+    def test_activate_unknown_monitor_raises_instead_of_silently_returning(self):
+        """Regression test: previously logged an error and silently `return`ed,
+        contradicting the method's own docstring. A caller wrapping this in
+        try/except (as the GUI does) saw no exception at all -- the button
+        click just did nothing, with zero feedback."""
+        self.mock_wm.get_outputs.return_value = []  # re-fetch also finds nothing
+        with self.assertRaises(MonitorNotFoundError):
+            self.manager.activate_monitor("does-not-exist")
+
+    def test_deactivate_unknown_monitor_raises_instead_of_silently_returning(self):
+        self.mock_wm.get_outputs.return_value = []
+        with self.assertRaises(MonitorNotFoundError):
+            self.manager.deactivate_monitor("does-not-exist")
 
 if __name__ == '__main__':
     unittest.main()

@@ -155,6 +155,37 @@ class TestSaveLoadRoundTrip(TestProfileManagerBase):
         with self.assertRaises(ProfileNotFoundError):
             self.pm.load_profile("does-not-exist")
 
+    def test_partial_failure_does_not_claim_current(self):
+        """Regression test: .current used to be set unconditionally even
+        when some outputs failed to apply, making list_profiles() report a
+        profile as "active" when its on-screen state didn't actually match."""
+        m = make_monitor()
+        m.pos_x, m.pos_y = 100, 200
+        self.wm = FakeWMAdapter([m])
+        self.pm = ProfileManager(self.wm, config_dir=Path(self.tmpdir))
+        self.pm.save_profile("work", self.wm.get_outputs())
+
+        m.pos_x, m.pos_y = 0, 0
+        self.wm.apply_is_effective = False
+
+        result = self.pm.load_profile("work")
+        self.assertFalse(result.ok)
+        self.assertIsNone(self.pm.get_current_label())
+
+    def test_malformed_entry_does_not_crash_load(self):
+        """Regression test: entry["unique_id"]/entry["mode"] were accessed
+        with raw dict indexing and no try/except -- a hand-edited or
+        future/older-schema profile missing a key raised an uncaught
+        KeyError past every `except EzSwayError` handler in the app."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+        path = self.pm.profiles_dir / "work.json"
+        data = json.loads(path.read_text())
+        data["outputs"].append({"active": True})  # missing unique_id and mode
+        path.write_text(json.dumps(data))
+
+        result = self.pm.load_profile("work")  # must not raise
+        self.assertTrue(any(f["unique_id"] == "?" for f in result.failed))
+
 
 class TestLocking(TestProfileManagerBase):
     def test_locked_profile_refuses_save_overwrite(self):
@@ -174,6 +205,45 @@ class TestLocking(TestProfileManagerBase):
         self.pm.lock_profile("work")
         self.pm.unlock_profile("work")
         self.pm.save_profile("work", self.wm.get_outputs())  # should not raise
+
+
+class TestPathTraversalAcrossAllMutatingMethods(TestProfileManagerBase):
+    """Regression tests: remove_profile/lock_profile/unlock_profile/
+    backup_profile/restore_backup used to build a filesystem path directly
+    from an unvalidated label/backup_id (only save_profile and
+    rename_profile called validate_label). A label like
+    '../../../../home/user/.ssh/id_rsa' reached _profile_path() unchecked in
+    every one of these -- e.g. remove_profile would path.unlink() an
+    arbitrary file outside profiles_dir."""
+
+    def test_remove_rejects_path_traversal(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.remove_profile("../../etc/passwd")
+
+    def test_lock_rejects_path_traversal(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.lock_profile("../../etc/passwd")
+
+    def test_unlock_rejects_path_traversal(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.unlock_profile("../../etc/passwd")
+
+    def test_backup_rejects_path_traversal(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.backup_profile("../../etc/passwd")
+
+    def test_restore_rejects_path_traversal_backup_id(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.restore_backup("../../etc/passwd")
+
+    def test_remove_outside_profiles_dir_impossible_even_if_file_exists(self):
+        """End-to-end: a file genuinely outside profiles_dir must survive a
+        traversal-style remove_profile call."""
+        outside_file = Path(self.tmpdir) / "canary.txt"
+        outside_file.write_text("should not be touched")
+        with self.assertRaises(InvalidLabelError):
+            self.pm.remove_profile("../canary")
+        self.assertTrue(outside_file.exists())
 
 
 class TestRenameRemove(TestProfileManagerBase):
@@ -265,6 +335,22 @@ class TestConcurrency(TestProfileManagerBase):
         try:
             with self.assertRaises(ConcurrentAccessError):
                 self.pm.save_profile("work", self.wm.get_outputs())
+        finally:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+            lock_file.close()
+
+    def test_load_profile_also_takes_the_lock(self):
+        """Regression test: load_profile was the only profile-mutating
+        method that didn't acquire self._locked(), even though it writes
+        shared state (.current) -- a concurrent remove/rename could corrupt
+        the pointer it's about to write."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+
+        lock_file = open(self.pm.lock_path, "r+")
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            with self.assertRaises(ConcurrentAccessError):
+                self.pm.load_profile("work")
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
             lock_file.close()

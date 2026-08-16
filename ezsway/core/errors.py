@@ -35,3 +35,13 @@ class ConcurrentAccessError(EzSwayError):
 
 class WMNotReachableError(EzSwayError):
     """Raised when no window-manager IPC can be reached at all (WM not running)."""
+
+
+class WMNotSupportedError(EzSwayError):
+    """Raised when the detected window manager has no working adapter yet
+    (e.g. Hyprland: architecture in place, not yet implemented)."""
+
+
+class MonitorNotFoundError(EzSwayError):
+    """Raised when a referenced monitor unique_id isn't among currently
+    connected outputs."""
