@@ -9,4 +9,5 @@ else
     PYTHON="python3"
 fi
 
-exec "$PYTHON" "$SCRIPT_DIR/ezsway/main.py" --tui
+cd "$SCRIPT_DIR"
+exec "$PYTHON" -m ezsway.main --tui

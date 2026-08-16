@@ -25,18 +25,18 @@ Flags: `./install.sh --no-autostart` / `./install.sh --no-keybind` to skip those
 ./run_tui.sh           # Interactive terminal UI
 ```
 
-Or via the CLI directly, for scripting:
+Or via the CLI directly, for scripting (run as a module, not as a bare script path -- `python ezsway/main.py` breaks its own imports):
 ```bash
-python ezsway/main.py profiles              # list saved profiles
-python ezsway/main.py setup [label]         # Setup Wizard: capture current layout
-python ezsway/main.py save <label>
-python ezsway/main.py load <label>
-python ezsway/main.py rename <old> <new>
-python ezsway/main.py remove <label>
-python ezsway/main.py lock <label>
-python ezsway/main.py unlock <label>
-python ezsway/main.py backup <label>
-python ezsway/main.py restore <backup_id>
+.venv/bin/python -m ezsway.main profiles              # list saved profiles
+.venv/bin/python -m ezsway.main setup [label]         # Setup Wizard: capture current layout
+.venv/bin/python -m ezsway.main save <label>
+.venv/bin/python -m ezsway.main load <label>
+.venv/bin/python -m ezsway.main rename <old> <new>
+.venv/bin/python -m ezsway.main remove <label>
+.venv/bin/python -m ezsway.main lock <label>
+.venv/bin/python -m ezsway.main unlock <label>
+.venv/bin/python -m ezsway.main backup <label>
+.venv/bin/python -m ezsway.main restore <backup_id>
 ```
 
 ### Setup Wizard

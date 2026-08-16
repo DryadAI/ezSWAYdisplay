@@ -12,4 +12,11 @@ else
     PYTHON="python3"
 fi
 
-exec "$PYTHON" "$SCRIPT_DIR/ezsway/main.py" --gui
+
+# Invoked as a module (-m ezsway.main), not as a bare script path -- running
+# ezsway/main.py directly breaks its own `from .core...` relative imports
+# ("ImportError: attempted relative import with no known parent package").
+# Caught via live testing on precision, not by the test suite, since pytest
+# always imports ezsway.* as a package and never invokes main.py this way.
+cd "$SCRIPT_DIR"
+exec "$PYTHON" -m ezsway.main --gui
