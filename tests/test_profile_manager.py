@@ -17,7 +17,7 @@ from ezsway.core.errors import (
     ProfileNotFoundError,
     ProfileWriteError,
 )
-from ezsway.core.profile_manager import ProfileManager, validate_label
+from ezsway.core.profile_manager import ProfileManager, validate_backup_id, validate_label
 from ezsway.core.wm_adapter import Monitor, WMAdapter
 
 
@@ -209,6 +209,21 @@ class TestSaveLoadRoundTrip(TestProfileManagerBase):
         result = self.pm.load_profile("work")  # must not raise
         self.assertTrue(any(f["unique_id"] == "?" for f in result.failed))
 
+    def test_non_string_mode_does_not_crash_load(self):
+        """Regression test: the except clause around entry["mode"].split("@")
+        only caught (KeyError, TypeError) -- a hand-edited or older/future-
+        schema profile with "mode": 1920 (a number, not a string) raised
+        AttributeError from .split(), uncaught by that clause."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+        path = self.pm.profiles_dir / "work.json"
+        data = json.loads(path.read_text())
+        data["outputs"][0]["mode"] = 1920  # number instead of "WxH@Hz" string
+        path.write_text(json.dumps(data))
+
+        result = self.pm.load_profile("work")  # must not raise
+        self.assertFalse(result.ok)
+        self.assertIn("Malformed profile entry", result.failed[0]["error"])
+
 
 class TestLocking(TestProfileManagerBase):
     def test_locked_profile_refuses_save_overwrite(self):
@@ -318,6 +333,37 @@ class TestRenameRemove(TestProfileManagerBase):
         with mock_patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
             with self.assertRaises(ProfileWriteError):
                 self.pm.rename_profile("work", "office")
+
+
+class TestBackupIdLengthOverflow(unittest.TestCase):
+    """Regression test: backup_profile() built backup_id as
+    "<label>__<timestamp>" and restore_backup() validated it with
+    validate_label() -- the same 64-char cap used for profile labels. A
+    profile with a 41-64 char label (valid on its own) produced a backup_id
+    exceeding 64 chars, which restore_backup() then rejected as "invalid"
+    before even checking whether the file existed -- the backup was listed
+    by list_backups() but could never be restored."""
+
+    def test_long_label_backup_id_still_validates(self):
+        long_label = "x" * 64  # at the label cap, maximally adversarial
+        backup_id = f"{long_label}__20260101_120000_123456"
+        self.assertGreater(len(backup_id), 64)
+        with self.assertRaises(InvalidLabelError):
+            validate_label(backup_id)  # the old (buggy) validator: rejects
+        self.assertEqual(validate_backup_id(backup_id), backup_id)  # the fix: accepts
+
+    def test_backup_of_max_length_label_can_be_restored(self):
+        tmpdir = tempfile.mkdtemp()
+        try:
+            wm = FakeWMAdapter([make_monitor()])
+            pm = ProfileManager(wm, config_dir=Path(tmpdir))
+            long_label = "x" * 64
+            pm.save_profile(long_label, wm.get_outputs())
+            backup_id = pm.backup_profile(long_label)
+            restored = pm.restore_backup(backup_id)  # must not raise
+            self.assertEqual(restored, long_label)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestBackupRestore(TestProfileManagerBase):

@@ -1,10 +1,12 @@
+import contextlib
+import fcntl
 import json
 import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional, Any
 
-from .errors import ConfigStoreError
+from .errors import ConcurrentAccessError, ConfigStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -19,8 +21,40 @@ class ConfigStore:
             self.config_dir = config_dir
 
         self.config_file = self.config_dir / "monitors.json"
+        self.lock_path = self.config_dir / ".monitors.lock"
         self.monitors_db: Dict[str, Dict[str, Any]] = {}
         self._load()
+
+    @contextlib.contextmanager
+    def _locked(self):
+        """Non-blocking exclusive lock around a mutation -- matches
+        ProfileManager's identical pattern, added for the identical problem:
+        the GUI's background poller and a separately-invoked `ezswaydisplay
+        enforce` (cron/systemd) each hold their own in-memory monitors_db
+        snapshot loaded once at __init__. Without this, process A activates
+        monitor X and saves; process B, still holding its pre-A snapshot,
+        later saves its own change and silently overwrites the *entire*
+        file with its stale copy -- monitor X reverts to "unknown" with no
+        error, undermining the default-deny safety invariant this tool
+        exists to enforce. The lock alone isn't sufficient, though -- see
+        set_monitor_config/forget_monitor, which also re-read fresh from
+        disk under the lock before mutating, rather than trusting the
+        possibly-stale in-memory copy.
+        """
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.lock_path.touch(exist_ok=True)
+        with open(self.lock_path, "r+") as f:
+            try:
+                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as e:
+                raise ConcurrentAccessError(
+                    "Another ezSWAYdisplay operation is already in progress "
+                    "(monitors lock held). Try again in a moment."
+                ) from e
+            try:
+                yield
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
 
     def _load(self):
         """Loads the configuration from disk.
@@ -58,6 +92,11 @@ class ConfigStore:
         Raises ConfigStoreError on any failure instead of swallowing it --
         callers must not assume persistence succeeded just because this
         returned without an exception previously being the only signal.
+
+        Does NOT take the lock itself -- callers that need read-modify-write
+        safety (set_monitor_config/forget_monitor) take it around the whole
+        _load()+mutate+save() sequence. Calling save() directly (as tests
+        do) is fine for the single-process case this was always safe for.
         """
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
@@ -91,8 +130,10 @@ class ConfigStore:
 
     def set_monitor_config(self, unique_id: str, config: Dict[str, Any]):
         """Sets configuration for a monitor ID. Raises ConfigStoreError if the save fails."""
-        self.monitors_db[unique_id] = config
-        self.save()
+        with self._locked():
+            self._load()  # fresh read under the lock -- see _locked()'s docstring
+            self.monitors_db[unique_id] = config
+            self.save()
 
     def is_known(self, unique_id: str) -> bool:
         """Checks if a monitor ID is known."""
@@ -100,6 +141,8 @@ class ConfigStore:
 
     def forget_monitor(self, unique_id: str):
         """Removes a monitor from the database."""
-        if unique_id in self.monitors_db:
-            del self.monitors_db[unique_id]
-            self.save()
+        with self._locked():
+            self._load()
+            if unique_id in self.monitors_db:
+                del self.monitors_db[unique_id]
+                self.save()

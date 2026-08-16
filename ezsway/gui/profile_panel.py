@@ -4,7 +4,6 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, pyqtSignal
 
-from ..core.errors import EzSwayError, ProfileNotFoundError
 from ..core.profile_manager import ProfileManager
 from ..core.setup_wizard import SetupWizard
 from ..core.wm_adapter import WMAdapter
@@ -19,6 +18,10 @@ class ProfilePanel(QWidget):
     a QMessageBox with the real error text -- matching (and extending
     consistently to every button) the pattern already established by
     MonitorWidget's activate_monitor handler.
+
+    Catches bare Exception, not just EzSwayError -- these are top-level Qt
+    slots with nothing above them to catch an unexpected non-EzSwayError
+    bug; see the matching comment in main_window.py.
     """
     on_open_arrange_canvas = pyqtSignal()
 
@@ -115,7 +118,7 @@ class ProfilePanel(QWidget):
                     self, "Partially applied",
                     f"{label!r} applied with {len(result.failed)} failure(s):\n{details}"
                 )
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
         self.refresh()
 
@@ -125,7 +128,7 @@ class ProfilePanel(QWidget):
             return
         try:
             self.pm.save_profile(label, self.wm.get_outputs())
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
         self.refresh()
 
@@ -138,7 +141,7 @@ class ProfilePanel(QWidget):
             return
         try:
             self.pm.rename_profile(old, new)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Rename failed", str(e))
         self.refresh()
 
@@ -152,7 +155,7 @@ class ProfilePanel(QWidget):
             return
         try:
             self.pm.remove_profile(label)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Delete failed", str(e))
         self.refresh()
 
@@ -162,7 +165,7 @@ class ProfilePanel(QWidget):
             return
         try:
             self.pm.lock_profile(label)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Lock failed", str(e))
         self.refresh()
 
@@ -172,7 +175,7 @@ class ProfilePanel(QWidget):
             return
         try:
             self.pm.unlock_profile(label)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Unlock failed", str(e))
         self.refresh()
 
@@ -183,7 +186,7 @@ class ProfilePanel(QWidget):
         try:
             backup_id = self.pm.backup_profile(label)
             QMessageBox.information(self, "Backed up", f"Saved as {backup_id}")
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Backup failed", str(e))
 
     def _on_restore(self):
@@ -199,7 +202,7 @@ class ProfilePanel(QWidget):
         try:
             restored_label = self.pm.restore_backup(backup_id)
             QMessageBox.information(self, "Restored", f"Restored -> profile {restored_label!r}")
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Restore failed", str(e))
         self.refresh()
 
@@ -212,6 +215,6 @@ class ProfilePanel(QWidget):
         try:
             saved_label = self.wizard.run(label=label or None)
             QMessageBox.information(self, "Setup complete", f"Saved current layout as {saved_label!r}.")
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Setup failed", str(e))
         self.refresh()

@@ -137,4 +137,9 @@ log ""
 log "Install complete. Re-running this script later is safe (idempotent)."
 log "  GUI:  $SCRIPT_DIR/run_gui.sh"
 log "  TUI:  $SCRIPT_DIR/run_tui.sh"
-log "  CLI:  $VENV_DIR/bin/python3 $SCRIPT_DIR/ezsway/main.py --help"
+# cd + -m, not a bare script path -- ezsway/main.py uses relative imports
+# ("from .core.errors import ...") and raises "ImportError: attempted
+# relative import with no known parent package" if run directly, the exact
+# failure run_gui.sh/run_tui.sh switched to `-m ezsway.main` to avoid. This
+# printed instruction wasn't updated to match when those were fixed.
+log "  CLI:  (cd $SCRIPT_DIR && $VENV_DIR/bin/python3 -m ezsway.main --help)"

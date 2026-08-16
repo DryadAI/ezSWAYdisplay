@@ -21,7 +21,6 @@ from PyQt6.QtWidgets import (
     QMessageBox, QPushButton, QVBoxLayout,
 )
 
-from ..core.errors import EzSwayError, WMCommandError
 from ..core.profile_manager import ProfileManager, verify_output_state
 from ..core.wm_adapter import Monitor, WMAdapter
 
@@ -94,7 +93,10 @@ class ArrangeCanvas(QDialog):
         self._items.clear()
         try:
             monitors = self.wm.get_outputs()
-        except WMCommandError as e:
+        except Exception as e:
+            # Bare Exception, not just WMCommandError -- top-level Qt slot
+            # (also invoked directly from __init__), same reasoning as
+            # main_window.py's handlers.
             QMessageBox.critical(self, "Cannot query displays", str(e))
             return
         self._monitors = {m.unique_id: m for m in monitors}
@@ -158,11 +160,19 @@ class ArrangeCanvas(QDialog):
     def _on_apply(self):
         positions = self._current_positions()
         any_failed = False
+        skipped_inactive = []
         for uid, (x, y) in positions.items():
             item = self._items[uid]
             m = self._monitors[uid]
             item.clear_apply_failed()
             if not m.active:
+                # Dragging a disabled monitor's rectangle doesn't actually
+                # reposition anything -- a disabled output has no
+                # meaningful on-screen position to send to the WM. This was
+                # previously a silent `continue` with no indication to the
+                # user why their drag had no effect; now it's surfaced in
+                # the summary dialog below instead of looking like a no-op.
+                skipped_inactive.append(m.name)
                 continue
             mode = f"{int(m.width)}x{int(m.height)}"
             position = f"{x} {y}"
@@ -174,7 +184,12 @@ class ArrangeCanvas(QDialog):
                     scale=m.scale,
                     transform=m.transform,
                 )
-            except (WMCommandError, ValueError) as e:
+            except Exception as e:
+                # Bare Exception, not just (WMCommandError, ValueError) --
+                # this is inside a per-monitor loop specifically so one bad
+                # output doesn't take down the rest; an unexpected exception
+                # type here previously escaped the loop entirely (and the
+                # slot), skipping every remaining monitor with no dialog.
                 logger.warning("Failed to apply position for %s: %s", uid, e)
                 item.mark_apply_failed()
                 any_failed = True
@@ -196,6 +211,12 @@ class ArrangeCanvas(QDialog):
                 self, "Partially applied",
                 "Some outputs did not apply -- they're outlined in red on the canvas.",
             )
+        elif skipped_inactive:
+            QMessageBox.information(
+                self, "Applied",
+                "Layout applied. Disabled displays weren't moved (nothing to "
+                f"reposition): {', '.join(skipped_inactive)}.",
+            )
         else:
             QMessageBox.information(self, "Applied", "Layout applied.")
 
@@ -210,5 +231,5 @@ class ArrangeCanvas(QDialog):
         try:
             self.pm.save_profile(label, list(self._monitors.values()))
             QMessageBox.information(self, "Saved", f"Saved as {label!r}.")
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))

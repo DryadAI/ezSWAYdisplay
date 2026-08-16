@@ -195,6 +195,23 @@ class TestSwayAdapterFallbackNullCurrentMode(unittest.TestCase):
         self.assertEqual(len(monitors), 1)
         self.assertEqual(monitors[0].width, 0)
 
+    def test_null_rect_does_not_crash(self):
+        """Same bug class as current_mode above, for "rect" -- this PR fixed
+        it for current_mode but missed the identical shape here in a later
+        review round."""
+        import json
+        fake_stdout = json.dumps([{
+            "name": "DP-1", "make": "Dell", "model": "M1", "serial": "S1",
+            "current_mode": {"width": 1920, "height": 1080, "refresh": 60000},
+            "active": True, "scale": 1.0, "rect": None,
+        }])
+        fake_result = MagicMock(stdout=fake_stdout)
+        with patch("ezsway.core.wm_adapter.subprocess.run", return_value=fake_result):
+            monitors = self.adapter.get_outputs()  # must not raise AttributeError
+        self.assertEqual(len(monitors), 1)
+        self.assertEqual(monitors[0].pos_x, 0)
+        self.assertEqual(monitors[0].pos_y, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

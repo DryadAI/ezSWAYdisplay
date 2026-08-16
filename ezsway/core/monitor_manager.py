@@ -72,7 +72,12 @@ class MonitorManager:
                 # No active monitors at all (headless start?). Enable first one.
                 m = unknown_monitors[0]
                 logger.info(f"Fail-safe: Activating {m.name}.")
-                mode_wh = f"{m.width}x{m.height}"
+                # int()-cast like profile_manager.py's save_profile does for
+                # the identical value -- width/height can surface as JSON
+                # floats via the swaymsg fallback path (no type coercion
+                # there), and wm_adapter.py's mode validator is a strict
+                # digit-only regex that rejects "1920.0x1080.0".
+                mode_wh = f"{int(m.width)}x{int(m.height)}"
                 try:
                     # Use the monitor's own detected mode, not the literal
                     # string "preferred" -- sway has no such mode keyword.
@@ -121,7 +126,7 @@ class MonitorManager:
                     try:
                         self.config_store.set_monitor_config(m.unique_id, {
                             "active": True,
-                            "mode": f"{m.width}x{m.height}",
+                            "mode": mode_wh,
                         })
                     except ConfigStoreError as e:
                         logger.error(
@@ -170,15 +175,18 @@ class MonitorManager:
             # nothing, with no feedback at all.
             raise MonitorNotFoundError(f"Cannot activate {unique_id!r}: monitor not connected.")
 
+        # int()-cast like profile_manager.py's save_profile does for the
+        # identical value -- see the matching comment in enforce_policy()'s
+        # fail-safe branch above.
+        mode_wh = f"{int(target.width)}x{int(target.height)}"
+        position = f"{target.pos_x} {target.pos_y}"
         config = {
             "active": True,
-            "mode": f"{target.width}x{target.height}",
-            "position": f"{target.pos_x} {target.pos_y}",
+            "mode": mode_wh,
+            "position": position,
             "scale": target.scale
         }
 
-        mode_wh = f"{target.width}x{target.height}"
-        position = f"{target.pos_x} {target.pos_y}"
         self.wm.enable_output(
             target.name,
             mode=mode_wh,

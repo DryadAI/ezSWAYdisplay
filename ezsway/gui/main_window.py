@@ -3,7 +3,6 @@ from PyQt6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QScrollArea,
                              QTabWidget)
 from PyQt6.QtCore import QTimer
 import sys
-from ..core.errors import EzSwayError
 from ..core.monitor_manager import MonitorManager
 from ..core.profile_manager import ProfileManager
 from .monitor_widget import MonitorWidget
@@ -69,31 +68,29 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.check_updates)
         self.timer.start(5000)
 
+    # Every handler below that's directly connected to a Qt signal (button
+    # click, timer, dialog-close) catches bare Exception, not just
+    # EzSwayError. These are top-level from Qt's perspective -- nothing in
+    # this codebase sits above a slot to catch what escapes it, so an
+    # unexpected non-EzSwayError bug (an AttributeError three layers down in
+    # a WM adapter, say) would otherwise propagate out of the slot silently
+    # instead of showing the dialog this hardening pass exists to guarantee.
+    # This was originally only done for run_policy() (the auto-run-on-
+    # startup handler); a later review round pointed out the same reasoning
+    # applies to every other slot, not just that one -- narrowing any of
+    # them to EzSwayError-only was leaving the same gap run_policy's own
+    # comment already explained, just not yet applied consistently.
+
     def open_arrange_canvas(self):
         dialog = ArrangeCanvas(self.manager.wm, self.profile_manager, parent=self)
         dialog.exec()
-        # Wrapped like every other refresh_list() call site in this file --
-        # this one was the exception, so a WM IPC drop while the Arrange
-        # Displays dialog was open (sway restart, session change) crashed
-        # the whole app on close instead of showing the same QMessageBox
-        # every other refresh failure produces.
         try:
             self.refresh_list()
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to refresh the display list: {e}")
         self.profile_panel.refresh()
 
     def run_policy(self):
-        # Deliberately broader than `except EzSwayError` (unlike every other
-        # handler in this file): this runs via QTimer.singleShot(0, ...)
-        # right after the window is first shown, with nothing above it in
-        # the call stack to catch anything else. The original code (before
-        # this PR's error-handling pass) caught bare Exception here for
-        # exactly that reason; narrowing it to EzSwayError only was a
-        # regression -- any other unexpected exception (e.g. a bug three
-        # layers down in a WM adapter) would crash the app on startup with
-        # no dialog at all, the opposite of what this hardening pass is
-        # supposed to guarantee for the app's very first action.
         try:
             self.manager.enforce_policy()
             self.refresh_list()
@@ -103,7 +100,7 @@ class MainWindow(QMainWindow):
     def check_updates(self):
         try:
             self.refresh_list(enforce=False)
-        except EzSwayError as e:
+        except Exception as e:
             # Don't pop a dialog every 5s on a persistent WM issue -- log and
             # let the user notice via the (now-stale) display list, same as
             # before this hardening pass, but at least not silently `pass`.
@@ -142,23 +139,23 @@ class MainWindow(QMainWindow):
         # double-toggles state which had already changed.
         try:
             self.manager.activate_monitor(unique_id)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to activate: {e}")
             return
         try:
             self.refresh_list()
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.warning(self, "Error", f"Activated, but failed to refresh the display list: {e}")
 
     def deactivate_monitor(self, unique_id):
         try:
             self.manager.deactivate_monitor(unique_id)
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to deactivate: {e}")
             return
         try:
             self.refresh_list()
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.warning(self, "Error", f"Deactivated, but failed to refresh the display list: {e}")
 
     def configure_monitor(self, unique_id):

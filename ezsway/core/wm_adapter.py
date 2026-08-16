@@ -197,6 +197,10 @@ class SwayAdapter(WMAdapter):
                 # i3ipc path already guards this correctly with `if
                 # current_mode:`; this fallback path didn't.
                 current_mode = out.get("current_mode") or {}
+                # Same null-vs-absent-key gap as current_mode above, for
+                # "rect" -- this PR fixed it for current_mode but missed the
+                # identical shape here.
+                rect = out.get("rect") or {}
                 monitors.append(Monitor(
                     name=out.get("name"),
                     make=out.get("make", "Unknown"),
@@ -207,8 +211,8 @@ class SwayAdapter(WMAdapter):
                     refresh_rate=current_mode.get("refresh", 60000) / 1000.0,
                     scale=out.get("scale") if out.get("scale") is not None else 1.0,
                     active=out.get("active", False),
-                    pos_x=out.get("rect", {}).get("x", 0),
-                    pos_y=out.get("rect", {}).get("y", 0),
+                    pos_x=rect.get("x", 0),
+                    pos_y=rect.get("y", 0),
                     transform=out.get("transform") or "normal",
                 ))
             return monitors

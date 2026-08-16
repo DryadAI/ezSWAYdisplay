@@ -31,6 +31,7 @@ from .wm_adapter import Monitor, WMAdapter
 logger = logging.getLogger(__name__)
 
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,63}$")
+_BACKUP_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,199}$")
 _LOCK_TIMEOUT_SECONDS = 5
 _APPLY_VERIFY_RETRIES = 3
 _APPLY_VERIFY_DELAY_SECONDS = 0.3
@@ -103,6 +104,26 @@ def validate_label(label: str) -> str:
             "'-', '_', '.' (1-64 characters, must start with a letter/number)."
         )
     return label
+
+
+def validate_backup_id(backup_id: str) -> str:
+    """Same character-safety rules as validate_label, but a longer max
+    length (200 vs 64) -- a backup_id is "<label>__<timestamp>", which can
+    legitimately exceed the 64-char label cap even for an otherwise-valid
+    label. Reusing validate_label() for backup_id meant a profile with a
+    41-64 char label (valid on its own) produced a backup that
+    restore_backup() could never load back -- it would reject the backup_id
+    for being "too long" before even checking whether the file existed.
+    """
+    if not backup_id or not backup_id.strip():
+        raise InvalidLabelError("Backup id cannot be empty.")
+    if backup_id in (".", ".."):
+        raise InvalidLabelError(f"Backup id {backup_id!r} is not allowed.")
+    if "/" in backup_id or "\\" in backup_id or ".." in backup_id:
+        raise InvalidLabelError(f"Backup id {backup_id!r} cannot contain path separators.")
+    if not _BACKUP_ID_RE.match(backup_id):
+        raise InvalidLabelError(f"Backup id {backup_id!r} contains invalid characters.")
+    return backup_id
 
 
 class ProfileManager:
@@ -334,7 +355,14 @@ class ProfileManager:
 
                 try:
                     mode_wh = entry["mode"].split("@")[0]  # "WxH@RRR.RRRHz" -> "WxH"
-                except (KeyError, TypeError) as e:
+                except (KeyError, TypeError, AttributeError) as e:
+                    # AttributeError added alongside KeyError/TypeError: a
+                    # hand-edited or older/future-schema profile with
+                    # "mode": 1920 (a number, not a string) raised
+                    # AttributeError on .split() -- this block's whole point
+                    # is to convert exactly this class of malformed-entry
+                    # crash into a per-output failure instead of letting it
+                    # propagate uncaught.
                     result.failed.append({"unique_id": uid, "error": f"Malformed profile entry: {e}"})
                     continue
 
@@ -496,9 +524,10 @@ class ProfileManager:
         """
         # backup_id becomes a filename below (backups_dir/<backup_id>.json) --
         # same path-traversal exposure as a profile label, so it gets the
-        # same character-safety validation (a backup_id is always
-        # "<label>__<timestamp>", which satisfies this charset).
-        backup_id = validate_label(backup_id)
+        # same character-safety validation, but via validate_backup_id (not
+        # validate_label) since "<label>__<timestamp>" can legitimately
+        # exceed the 64-char label cap.
+        backup_id = validate_backup_id(backup_id)
         with self._locked():
             src = self.backups_dir / f"{backup_id}.json"
             if not src.exists():
