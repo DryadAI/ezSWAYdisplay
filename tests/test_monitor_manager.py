@@ -94,6 +94,12 @@ class TestMonitorManager(unittest.TestCase):
         """Test activation logic."""
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=False, pos_x=0, pos_y=0)
         self.manager.monitors = [m1]
+        # activate_monitor now verifies the change actually took effect
+        # (verify_output_state polls get_outputs() again) -- reflect the
+        # post-enable state here, same as a real WM would report.
+        self.mock_wm.get_outputs.return_value = [
+            Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True, pos_x=0, pos_y=0)
+        ]
 
         self.manager.activate_monitor(m1.unique_id)
 
@@ -113,6 +119,10 @@ class TestMonitorManager(unittest.TestCase):
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0,
                       active=False, pos_x=0, pos_y=0, transform="90")
         self.manager.monitors = [m1]
+        self.mock_wm.get_outputs.return_value = [
+            Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0,
+                    active=True, pos_x=0, pos_y=0, transform="90")
+        ]
 
         self.manager.activate_monitor(m1.unique_id)
 
@@ -125,7 +135,11 @@ class TestMonitorManager(unittest.TestCase):
         silently no-op if the monitor isn't in the last-known self.monitors list."""
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True)
         self.manager.monitors = []  # stale/empty -- simulates monitor not yet refreshed
-        self.mock_wm.get_outputs.return_value = [m1]
+        # First get_outputs() call is the re-fetch that locates the target;
+        # the second is verify_output_state()'s post-disable poll -- an
+        # empty result there means "no longer connected/active", which
+        # correctly counts as verified-disabled.
+        self.mock_wm.get_outputs.side_effect = [[m1], []]
 
         self.manager.deactivate_monitor(m1.unique_id)
 
@@ -158,6 +172,9 @@ class TestMonitorManager(unittest.TestCase):
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=False)
         self.manager.monitors = [m1]
         self.mock_store.set_monitor_config.side_effect = ConfigStoreError("disk full")
+        self.mock_wm.get_outputs.return_value = [
+            Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True, pos_x=0, pos_y=0)
+        ]
 
         self.manager.activate_monitor(m1.unique_id)  # must not raise
 
@@ -167,6 +184,10 @@ class TestMonitorManager(unittest.TestCase):
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True)
         self.manager.monitors = [m1]
         self.mock_store.set_monitor_config.side_effect = ConfigStoreError("disk full")
+        # Explicit (not relying on MagicMock's default empty-iterator
+        # behavior) -- verify_output_state()'s post-disable poll finding no
+        # matching connected monitor counts as verified-disabled.
+        self.mock_wm.get_outputs.return_value = []
 
         self.manager.deactivate_monitor(m1.unique_id)  # must not raise
 

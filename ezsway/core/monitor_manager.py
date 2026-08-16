@@ -2,6 +2,7 @@ from typing import List
 from .wm_adapter import WMFactory, WMAdapter, Monitor
 from .config_store import ConfigStore
 from .errors import ConfigStoreError, MonitorNotFoundError, WMCommandError
+from .profile_manager import verify_output_state
 import logging
 
 logging.basicConfig(level=logging.INFO)
@@ -71,6 +72,7 @@ class MonitorManager:
                 # No active monitors at all (headless start?). Enable first one.
                 m = unknown_monitors[0]
                 logger.info(f"Fail-safe: Activating {m.name}.")
+                mode_wh = f"{m.width}x{m.height}"
                 try:
                     # Use the monitor's own detected mode, not the literal
                     # string "preferred" -- sway has no such mode keyword.
@@ -80,10 +82,21 @@ class MonitorManager:
                     # every fail-safe activation / reactivation.
                     self.wm.enable_output(
                         m.name,
-                        mode=f"{m.width}x{m.height}",
+                        mode=mode_wh,
                         position="0 0",
                         transform=m.transform,
                     )
+                    # Same "IPC success doesn't guarantee it actually
+                    # happened" verification the rest of this codebase uses
+                    # (profile_manager.load_profile, ArrangeCanvas.Apply) --
+                    # this fail-safe path is arguably the single place it
+                    # matters most, since it's the mechanism that's supposed
+                    # to guarantee the user isn't locked out with zero
+                    # displays.
+                    if not verify_output_state(self.wm, m.unique_id, want_wh=mode_wh, want_pos="0 0"):
+                        raise WMCommandError(
+                            f"Fail-safe enable of {m.name} was accepted but not verified applied"
+                        )
                 except WMCommandError as e:
                     logger.error(f"Fail-safe activation of {m.name} failed: {e}")
                 else:
@@ -124,6 +137,12 @@ class MonitorManager:
                     self.wm.disable_output(m.name)
                 except WMCommandError as e:
                     logger.error(f"Failed to disable unknown monitor {m.name}: {e}")
+                else:
+                    if not verify_output_state(self.wm, m.unique_id, want_disabled=True):
+                        logger.error(
+                            f"Disable of unknown monitor {m.name} was accepted "
+                            "but not verified applied -- it may still be on screen."
+                        )
                 # We do NOT save this state, so it remains "unknown" until user explicitly configures it.
 
     def activate_monitor(self, unique_id: str):
@@ -158,13 +177,22 @@ class MonitorManager:
             "scale": target.scale
         }
 
+        mode_wh = f"{target.width}x{target.height}"
+        position = f"{target.pos_x} {target.pos_y}"
         self.wm.enable_output(
             target.name,
-            mode=f"{target.width}x{target.height}",
-            position=f"{target.pos_x} {target.pos_y}",
+            mode=mode_wh,
+            position=position,
             scale=target.scale,
             transform=target.transform,
         )
+        if not verify_output_state(self.wm, unique_id, want_wh=mode_wh, want_pos=position):
+            # Matches this method's own docstring ("Raises ... on failure")
+            # and the same verification profile_manager.load_profile() and
+            # ArrangeCanvas.Apply already have for the identical operation --
+            # an IPC "success" reply doesn't guarantee the output actually
+            # changed.
+            raise WMCommandError(f"Activated {target.name} but change was not verified applied")
         # Persistence is deliberately separated from the physical action --
         # same reasoning as enforce_policy()'s fail-safe branch: if
         # enable_output() above already succeeded (the monitor is really
@@ -193,6 +221,8 @@ class MonitorManager:
             raise MonitorNotFoundError(f"Cannot deactivate {unique_id!r}: monitor not connected.")
 
         self.wm.disable_output(target.name)
+        if not verify_output_state(self.wm, unique_id, want_disabled=True):
+            raise WMCommandError(f"Deactivated {target.name} but change was not verified applied")
         try:
             self.config_store.set_monitor_config(unique_id, {"active": False})
         except ConfigStoreError as e:
