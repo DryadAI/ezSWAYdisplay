@@ -70,7 +70,7 @@ def make_monitor(name="DP-1", make="Dell", model="M1", serial="S1", active=True)
 
 class TestLabelValidation(unittest.TestCase):
     def test_valid_label_accepted(self):
-        self.assertEqual(validate_label("Alissons"), "Alissons")
+        self.assertEqual(validate_label("MyDesk"), "MyDesk")
         self.assertEqual(validate_label("office-2"), "office-2")
 
     def test_empty_label_rejected(self):
