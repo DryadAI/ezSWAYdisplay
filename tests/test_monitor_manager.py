@@ -73,11 +73,28 @@ class TestMonitorManager(unittest.TestCase):
         """Test activation logic."""
         m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=False, pos_x=0, pos_y=0)
         self.manager.monitors = [m1]
-        
+
         self.manager.activate_monitor(m1.unique_id)
-        
+
         self.mock_store.set_monitor_config.assert_called()
-        self.mock_wm.enable_output.assert_called_with("DP-1", mode="preferred", position="0 0", scale=1.0)
+        # Regression test: activate_monitor must pass the monitor's own detected
+        # mode ("1920x1080"), not the literal string "preferred" -- sway has no
+        # such mode keyword, so the old value here silently no-op'd on real sway.
+        self.mock_wm.enable_output.assert_called_with(
+            "DP-1", mode="1920x1080", position="0 0", scale=1.0
+        )
+
+    def test_deactivate_monitor_refetches_if_stale(self):
+        """deactivate_monitor must re-fetch like activate_monitor does, not
+        silently no-op if the monitor isn't in the last-known self.monitors list."""
+        m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True)
+        self.manager.monitors = []  # stale/empty -- simulates monitor not yet refreshed
+        self.mock_wm.get_outputs.return_value = [m1]
+
+        self.manager.deactivate_monitor(m1.unique_id)
+
+        self.mock_wm.disable_output.assert_called_once_with("DP-1")
+        self.mock_store.set_monitor_config.assert_called_with(m1.unique_id, {"active": False})
 
 if __name__ == '__main__':
     unittest.main()
