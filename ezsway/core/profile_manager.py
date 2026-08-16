@@ -47,6 +47,43 @@ class LoadResult:
         return not self.failed
 
 
+def verify_output_state(wm: WMAdapter, unique_id: str, *, want_wh: Optional[str] = None,
+                         want_pos: Optional[str] = None, want_disabled: bool = False,
+                         retries: int = _APPLY_VERIFY_RETRIES,
+                         delay: float = _APPLY_VERIFY_DELAY_SECONDS) -> bool:
+    """Polls wm.get_outputs() up to `retries` times, confirming a monitor
+    actually reached the requested state -- a sway IPC "success: true" reply
+    does not guarantee the change actually took effect (the class of bug
+    this whole tool exists to catch). Shared between ProfileManager
+    (save/load) and the GUI's drag-and-drop ArrangeCanvas.Apply, which
+    previously reimplemented "call enable_output" without this check at all.
+
+    A WM-unreachable blip during the poll itself is treated as "try again
+    next retry", not a hard failure -- a transient IPC drop while polling
+    (e.g. sway briefly restarting because of the very change being
+    verified) shouldn't be indistinguishable from the change never applying.
+    """
+    for _ in range(retries):
+        time.sleep(delay)
+        try:
+            outputs = wm.get_outputs()
+        except WMCommandError:
+            continue
+        live = next((m for m in outputs if m.unique_id == unique_id), None)
+        if want_disabled:
+            if live is None or not live.active:
+                return True
+            continue
+        if live is None:
+            continue
+        if want_wh is not None and f"{int(live.width)}x{int(live.height)}" != want_wh:
+            continue
+        if want_pos is not None and f"{live.pos_x} {live.pos_y}" != want_pos:
+            continue
+        return True
+    return False
+
+
 def validate_label(label: str) -> str:
     """Raises InvalidLabelError for empty/unsafe labels. Returns the label unchanged if valid.
 
@@ -123,6 +160,13 @@ class ProfileManager:
             # showing the clean error message this error hierarchy exists
             # to guarantee.
             raise ProfileWriteError(f"Failed to write {path}: {e}") from e
+        except (TypeError, ValueError) as e:
+            # Matches config_store.py's ConfigStore.save(), which was
+            # patched for the identical gap: only OSError was caught here,
+            # so a non-JSON-serializable value ever ending up in a profile
+            # dict would raise a bare TypeError past every `except
+            # EzSwayError` handler.
+            raise ProfileWriteError(f"Failed to serialize data for {path}: {e}") from e
         finally:
             if tmp.exists():
                 with contextlib.suppress(OSError):
@@ -235,6 +279,14 @@ class ProfileManager:
         "success:true but nothing actually changed" failure mode this tool
         was built to catch.
         """
+        # load_profile was the one label-consuming method that never called
+        # validate_label() -- every other mutating method (save/rename/
+        # remove/lock/unlock/backup/restore) was patched for exactly this
+        # path-traversal class of bug in an earlier pass, but this one
+        # builds a filesystem path from the raw label just the same
+        # (`ezswaydisplay load '../../../../etc/passwd'` would reach
+        # open()+json.load() on an arbitrary file).
+        label = validate_label(label)
         result = LoadResult()
 
         with self._locked():
@@ -330,26 +382,14 @@ class ProfileManager:
                     tmp.unlink()
 
     def _verify_applied(self, unique_id: str, entry: dict) -> bool:
-        want_wh = entry["mode"].split("@")[0]
-        want_pos = entry.get("position", "0 0")
-        for _ in range(_APPLY_VERIFY_RETRIES):
-            time.sleep(_APPLY_VERIFY_DELAY_SECONDS)
-            live = next((m for m in self.wm.get_outputs() if m.unique_id == unique_id), None)
-            if live is None:
-                continue
-            got_wh = f"{int(live.width)}x{int(live.height)}"
-            got_pos = f"{live.pos_x} {live.pos_y}"
-            if got_wh == want_wh and got_pos == want_pos:
-                return True
-        return False
+        return verify_output_state(
+            self.wm, unique_id,
+            want_wh=entry["mode"].split("@")[0],
+            want_pos=entry.get("position", "0 0"),
+        )
 
     def _verify_disabled(self, unique_id: str) -> bool:
-        for _ in range(_APPLY_VERIFY_RETRIES):
-            time.sleep(_APPLY_VERIFY_DELAY_SECONDS)
-            live = next((m for m in self.wm.get_outputs() if m.unique_id == unique_id), None)
-            if live is None or not live.active:
-                return True
-        return False
+        return verify_output_state(self.wm, unique_id, want_disabled=True)
 
     def rename_profile(self, old: str, new: str) -> None:
         old = validate_label(old)
@@ -365,7 +405,17 @@ class ProfileManager:
             data = self._read_profile_raw(old_path) or {}
             data["label"] = new
             self._write_atomic(new_path, data)
-            old_path.unlink()
+            try:
+                old_path.unlink()
+            except OSError as e:
+                # If the old file survives (read-only mount, another process
+                # holding it, etc.), the new copy at new_path already exists
+                # -- both files present is a real inconsistent state worth
+                # surfacing clearly rather than crashing with a bare OSError
+                # past every `except EzSwayError` handler in the app.
+                raise ProfileWriteError(
+                    f"Renamed to {new!r} but could not remove the old file {old_path}: {e}"
+                ) from e
             if self.get_current_label() == old:
                 # Atomic like every other write in this class (load_profile
                 # uses _write_atomic_text for the identical file) -- a raw
@@ -382,7 +432,15 @@ class ProfileManager:
             path = self._profile_path(label)
             if not path.exists():
                 raise ProfileNotFoundError(f"No such profile: {label!r}")
-            path.unlink()
+            try:
+                path.unlink()
+            except OSError as e:
+                # Inconsistent with the current_path cleanup a few lines
+                # below, which correctly suppresses OSError -- deleting the
+                # *primary* profile file failing (read-only mount, immutable
+                # attribute) is a real failure worth surfacing, not silently
+                # swallowing.
+                raise ProfileWriteError(f"Failed to remove {path}: {e}") from e
             if self.get_current_label() == label:
                 with contextlib.suppress(OSError):
                     self.current_path.unlink()

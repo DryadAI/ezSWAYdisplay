@@ -6,7 +6,7 @@ import os
 sys.path.append(os.getcwd())
 
 from ezsway.core.wm_adapter import SwayAdapter, WMFactory, HyprlandAdapter
-from ezsway.core.errors import WMCommandError, WMNotSupportedError
+from ezsway.core.errors import EzSwayError, InvalidWMParameterError, WMCommandError, WMNotSupportedError
 
 
 class TestSwayAdapterCommandChecking(unittest.TestCase):
@@ -130,6 +130,70 @@ class TestWMFactoryHyprland(unittest.TestCase):
             adapter.enable_output("m1", "1920x1080", "0 0")
         with self.assertRaises(WMNotSupportedError):
             adapter.disable_output("m1")
+
+
+class TestInvalidWMParameterErrorIsBothTypes(unittest.TestCase):
+    """Regression test for the design that closes the gap where several
+    call sites (activate_monitor, enforce_policy's fail-safe branch, and
+    their GUI/TUI/CLI callers) only caught `except EzSwayError` and would
+    have let a bare ValueError from the input validators escape uncaught.
+    InvalidWMParameterError is deliberately BOTH a ValueError and an
+    EzSwayError (multiple inheritance) so every existing handler of either
+    type catches it automatically, with no call sites needing to change."""
+
+    def setUp(self):
+        with patch("ezsway.core.wm_adapter.i3ipc.Connection"):
+            self.adapter = SwayAdapter()
+        self.adapter.ipc = MagicMock()
+
+    def test_is_instance_of_both_valueerror_and_ezswayerror(self):
+        try:
+            self.adapter.enable_output("DP-1", mode="bad-mode", position="0 0")
+        except Exception as e:
+            self.assertIsInstance(e, ValueError)
+            self.assertIsInstance(e, EzSwayError)
+            self.assertIsInstance(e, InvalidWMParameterError)
+        else:
+            self.fail("expected an exception")
+
+    def test_caught_by_bare_except_ezswayerror(self):
+        try:
+            try:
+                self.adapter.enable_output("DP-1", mode="bad-mode", position="0 0")
+            except EzSwayError:
+                pass  # this is the assertion -- must not fall through uncaught
+            else:
+                self.fail("expected EzSwayError to be raised")
+        except ValueError:
+            self.fail("EzSwayError handler did not catch it -- ValueError leaked past it")
+
+
+class TestSwayAdapterFallbackNullCurrentMode(unittest.TestCase):
+    """Regression test: sway reports current_mode as JSON *null* (not an
+    absent key) for a disabled/disconnected output. out.get("current_mode",
+    {}) only supplies the {} default when the key is missing entirely, so a
+    present-but-null value made the chained .get("width", 0) raise
+    AttributeError on None -- uncaught by the narrow except clause on this
+    fallback path (the primary i3ipc path already guarded this correctly)."""
+
+    def setUp(self):
+        with patch("ezsway.core.wm_adapter.i3ipc.Connection", side_effect=Exception("no ipc")):
+            self.adapter = SwayAdapter()
+        self.assertIsNone(self.adapter.ipc)  # confirms we're exercising the fallback path
+
+    def test_null_current_mode_does_not_crash(self):
+        import json
+        import subprocess as sp
+        fake_stdout = json.dumps([{
+            "name": "DP-1", "make": "Dell", "model": "M1", "serial": "S1",
+            "current_mode": None, "active": False, "scale": 1.0,
+            "rect": {"x": 0, "y": 0},
+        }])
+        fake_result = MagicMock(stdout=fake_stdout)
+        with patch("ezsway.core.wm_adapter.subprocess.run", return_value=fake_result):
+            monitors = self.adapter.get_outputs()  # must not raise AttributeError
+        self.assertEqual(len(monitors), 1)
+        self.assertEqual(monitors[0].width, 0)
 
 
 if __name__ == "__main__":

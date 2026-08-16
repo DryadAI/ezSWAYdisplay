@@ -165,7 +165,16 @@ class MonitorManager:
             scale=target.scale,
             transform=target.transform,
         )
-        self.config_store.set_monitor_config(unique_id, config)
+        # Persistence is deliberately separated from the physical action --
+        # same reasoning as enforce_policy()'s fail-safe branch: if
+        # enable_output() above already succeeded (the monitor is really
+        # on), a subsequent ConfigStoreError (disk full/permission denied)
+        # shouldn't make the caller believe activation itself failed and
+        # potentially retry, double-toggling state that's already correct.
+        try:
+            self.config_store.set_monitor_config(unique_id, config)
+        except ConfigStoreError as e:
+            logger.error(f"Activated {target.name} but failed to persist as known: {e}")
         logger.info(f"Activated monitor {target.name}")
 
     def deactivate_monitor(self, unique_id: str):
@@ -184,5 +193,8 @@ class MonitorManager:
             raise MonitorNotFoundError(f"Cannot deactivate {unique_id!r}: monitor not connected.")
 
         self.wm.disable_output(target.name)
-        self.config_store.set_monitor_config(unique_id, {"active": False})
+        try:
+            self.config_store.set_monitor_config(unique_id, {"active": False})
+        except ConfigStoreError as e:
+            logger.error(f"Deactivated {target.name} but failed to persist: {e}")
         logger.info(f"Disabled monitor {target.name}")

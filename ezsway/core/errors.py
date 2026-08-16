@@ -50,3 +50,14 @@ class MonitorNotFoundError(EzSwayError):
 class ProfileWriteError(EzSwayError):
     """Raised when writing a profile or its .current pointer to disk fails
     (disk full, permission denied, etc.)."""
+
+
+class InvalidWMParameterError(EzSwayError, ValueError):
+    """Raised by WMAdapter's input validators (mode/position/scale/
+    transform/connector-name) for malformed values -- deliberately also a
+    ValueError (multiple inheritance), so existing `except ValueError`
+    checks keep working while every `except EzSwayError` handler
+    throughout the app *also* catches it automatically. Several call sites
+    (activate_monitor, enforce_policy's fail-safe branch, and their GUI/TUI/
+    CLI callers) only caught EzSwayError and would otherwise let a bare
+    ValueError from these validators escape uncaught."""

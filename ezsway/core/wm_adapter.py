@@ -7,7 +7,7 @@ from typing import List
 import i3ipc
 import sys
 
-from .errors import WMCommandError, WMNotSupportedError
+from .errors import InvalidWMParameterError, WMCommandError, WMNotSupportedError
 
 VALID_TRANSFORMS = {
     "normal", "90", "180", "270",
@@ -78,33 +78,33 @@ _CONNECTOR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 def _validate_connector_name(name: str):
     if not _CONNECTOR_NAME_RE.match(str(name)):
-        raise ValueError(f"Invalid connector name {name!r}")
+        raise InvalidWMParameterError(f"Invalid connector name {name!r}")
 
 
 def _validate_transform(transform: str):
     if transform not in VALID_TRANSFORMS:
-        raise ValueError(
+        raise InvalidWMParameterError(
             f"Invalid transform {transform!r}; must be one of {sorted(VALID_TRANSFORMS)}"
         )
 
 
 def _validate_mode(mode: str):
     if not _MODE_RE.match(str(mode)):
-        raise ValueError(f"Invalid mode {mode!r}; expected '<width>x<height>'")
+        raise InvalidWMParameterError(f"Invalid mode {mode!r}; expected '<width>x<height>'")
 
 
 def _validate_position(position: str):
     if not _POSITION_RE.match(str(position)):
-        raise ValueError(f"Invalid position {position!r}; expected '<x> <y>'")
+        raise InvalidWMParameterError(f"Invalid position {position!r}; expected '<x> <y>'")
 
 
 def _validate_scale(scale) -> float:
     try:
         value = float(scale)
     except (TypeError, ValueError):
-        raise ValueError(f"Invalid scale {scale!r}; must be a number")
+        raise InvalidWMParameterError(f"Invalid scale {scale!r}; must be a number")
     if not (0.1 <= value <= 10.0):
-        raise ValueError(f"Invalid scale {value!r}; must be between 0.1 and 10.0")
+        raise InvalidWMParameterError(f"Invalid scale {value!r}; must be between 0.1 and 10.0")
     return value
 
 
@@ -188,14 +188,23 @@ class SwayAdapter(WMAdapter):
             data = json.loads(result.stdout)
             monitors = []
             for out in data:
+                # sway reports current_mode as JSON *null* (not an absent
+                # key) for a disabled/disconnected output -- out.get(
+                # "current_mode", {}) only supplies the {} default when the
+                # key is missing entirely, so a present-but-null value made
+                # the chained .get("width", 0) raise AttributeError on None,
+                # uncaught by this method's except clause. The primary
+                # i3ipc path already guards this correctly with `if
+                # current_mode:`; this fallback path didn't.
+                current_mode = out.get("current_mode") or {}
                 monitors.append(Monitor(
                     name=out.get("name"),
                     make=out.get("make", "Unknown"),
                     model=out.get("model", "Unknown"),
                     serial=out.get("serial", "Unknown"),
-                    width=out.get("current_mode", {}).get("width", 0),
-                    height=out.get("current_mode", {}).get("height", 0),
-                    refresh_rate=out.get("current_mode", {}).get("refresh", 60000) / 1000.0,
+                    width=current_mode.get("width", 0),
+                    height=current_mode.get("height", 0),
+                    refresh_rate=current_mode.get("refresh", 60000) / 1000.0,
                     scale=out.get("scale") if out.get("scale") is not None else 1.0,
                     active=out.get("active", False),
                     pos_x=out.get("rect", {}).get("x", 0),

@@ -22,7 +22,7 @@ from PyQt6.QtWidgets import (
 )
 
 from ..core.errors import EzSwayError, WMCommandError
-from ..core.profile_manager import ProfileManager
+from ..core.profile_manager import ProfileManager, verify_output_state
 from ..core.wm_adapter import Monitor, WMAdapter
 
 logger = logging.getLogger(__name__)
@@ -164,16 +164,30 @@ class ArrangeCanvas(QDialog):
             item.clear_apply_failed()
             if not m.active:
                 continue
+            mode = f"{int(m.width)}x{int(m.height)}"
+            position = f"{x} {y}"
             try:
                 self.wm.enable_output(
                     m.name,
-                    mode=f"{int(m.width)}x{int(m.height)}",
-                    position=f"{x} {y}",
+                    mode=mode,
+                    position=position,
                     scale=m.scale,
                     transform=m.transform,
                 )
             except (WMCommandError, ValueError) as e:
                 logger.warning("Failed to apply position for %s: %s", uid, e)
+                item.mark_apply_failed()
+                any_failed = True
+                continue
+
+            # Re-query and confirm the change actually took effect -- this
+            # reimplemented "call enable_output" without the same
+            # verification profile_manager.load_profile() has (a sway
+            # "success: true" reply doesn't guarantee the output actually
+            # moved), so a drag-and-drop Apply could report success while
+            # the layout silently didn't change.
+            if not verify_output_state(self.wm, uid, want_wh=mode, want_pos=position):
+                logger.warning("Position for %s was accepted but not verified applied", uid)
                 item.mark_apply_failed()
                 any_failed = True
 

@@ -84,10 +84,20 @@ class MainWindow(QMainWindow):
         self.profile_panel.refresh()
 
     def run_policy(self):
+        # Deliberately broader than `except EzSwayError` (unlike every other
+        # handler in this file): this runs via QTimer.singleShot(0, ...)
+        # right after the window is first shown, with nothing above it in
+        # the call stack to catch anything else. The original code (before
+        # this PR's error-handling pass) caught bare Exception here for
+        # exactly that reason; narrowing it to EzSwayError only was a
+        # regression -- any other unexpected exception (e.g. a bug three
+        # layers down in a WM adapter) would crash the app on startup with
+        # no dialog at all, the opposite of what this hardening pass is
+        # supposed to guarantee for the app's very first action.
         try:
             self.manager.enforce_policy()
             self.refresh_list()
-        except EzSwayError as e:
+        except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to enforce policy: {e}")
 
     def check_updates(self):

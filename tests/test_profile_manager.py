@@ -268,6 +268,15 @@ class TestPathTraversalAcrossAllMutatingMethods(TestProfileManagerBase):
             self.pm.remove_profile("../canary")
         self.assertTrue(outside_file.exists())
 
+    def test_load_rejects_path_traversal(self):
+        """load_profile() was the one label-consuming method missed by the
+        original path-traversal fix -- it builds a filesystem path from the
+        raw label just like every method above, so
+        `ezswaydisplay load '../../../../etc/passwd'` reached open() on an
+        arbitrary file."""
+        with self.assertRaises(InvalidLabelError):
+            self.pm.load_profile("../../etc/passwd")
+
 
 class TestRenameRemove(TestProfileManagerBase):
     def test_rename_updates_current_pointer(self):
@@ -289,6 +298,26 @@ class TestRenameRemove(TestProfileManagerBase):
         self.pm.load_profile("work")
         self.pm.remove_profile("work")
         self.assertIsNone(self.pm.get_current_label())
+
+    def test_remove_unlink_failure_raises_profile_write_error(self):
+        """Regression test: path.unlink() in remove_profile() was unguarded
+        (inconsistent with the nearby current_path cleanup, which correctly
+        suppresses OSError) -- deleting the primary profile file failing
+        raised a bare OSError past every `except EzSwayError` handler."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+        from unittest.mock import patch as mock_patch
+        with mock_patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+            with self.assertRaises(ProfileWriteError):
+                self.pm.remove_profile("work")
+
+    def test_rename_unlink_failure_raises_profile_write_error(self):
+        """Same class of bug as remove_profile, for the old_path.unlink()
+        call after the renamed copy has already been written."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+        from unittest.mock import patch as mock_patch
+        with mock_patch("pathlib.Path.unlink", side_effect=OSError("permission denied")):
+            with self.assertRaises(ProfileWriteError):
+                self.pm.rename_profile("work", "office")
 
 
 class TestBackupRestore(TestProfileManagerBase):

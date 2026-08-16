@@ -146,5 +146,31 @@ class TestMonitorManager(unittest.TestCase):
         with self.assertRaises(MonitorNotFoundError):
             self.manager.deactivate_monitor("does-not-exist")
 
+    def test_activate_survives_config_store_failure_after_physical_success(self):
+        """Regression test: activate_monitor() called enable_output()/
+        set_monitor_config() as one unguarded unit, so a persistence-only
+        failure (disk full/permission denied) after the physical action
+        already succeeded was misreported to the caller as a total failure
+        -- potentially prompting a confusing retry that double-toggles
+        state that's already correct. enforce_policy()'s fail-safe branch
+        was hardened against this exact class in an earlier pass;
+        activate_monitor/deactivate_monitor were not."""
+        m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=False)
+        self.manager.monitors = [m1]
+        self.mock_store.set_monitor_config.side_effect = ConfigStoreError("disk full")
+
+        self.manager.activate_monitor(m1.unique_id)  # must not raise
+
+        self.mock_wm.enable_output.assert_called_once()
+
+    def test_deactivate_survives_config_store_failure_after_physical_success(self):
+        m1 = Monitor("DP-1", "Dell", "M1", "123", 1920, 1080, 60.0, active=True)
+        self.manager.monitors = [m1]
+        self.mock_store.set_monitor_config.side_effect = ConfigStoreError("disk full")
+
+        self.manager.deactivate_monitor(m1.unique_id)  # must not raise
+
+        self.mock_wm.disable_output.assert_called_once_with("DP-1")
+
 if __name__ == '__main__':
     unittest.main()
