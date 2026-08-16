@@ -1,19 +1,25 @@
 import os
 import json
 import subprocess
-import shutil
 from abc import ABC, abstractmethod
-from typing import List, Dict, Optional
+from typing import List
 import i3ipc
-import time
 import sys
+
+from .errors import WMCommandError
+
+VALID_TRANSFORMS = {
+    "normal", "90", "180", "270",
+    "flipped", "flipped-90", "flipped-180", "flipped-270",
+}
+
 
 class Monitor:
     """Data class representing a connected monitor."""
-    def __init__(self, name: str, make: str, model: str, serial: str, 
-                 width: int, height: int, refresh_rate: float, 
+    def __init__(self, name: str, make: str, model: str, serial: str,
+                 width: int, height: int, refresh_rate: float,
                  scale: float = 1.0, active: bool = False,
-                 pos_x: int = 0, pos_y: int = 0):
+                 pos_x: int = 0, pos_y: int = 0, transform: str = "normal"):
         self.name = name
         self.make = make
         self.model = model
@@ -25,6 +31,7 @@ class Monitor:
         self.active = active
         self.pos_x = pos_x
         self.pos_y = pos_y
+        self.transform = transform
 
     @property
     def unique_id(self) -> str:
@@ -44,13 +51,17 @@ class WMAdapter(ABC):
         pass
 
     @abstractmethod
-    def enable_output(self, monitor_name: str, mode: str, position: str, scale: float = 1.0):
-        """Enables a specific output with given configuration."""
+    def enable_output(self, monitor_name: str, mode: str, position: str,
+                       scale: float = 1.0, transform: str = "normal"):
+        """Enables a specific output with given configuration.
+
+        Raises WMCommandError if the WM rejects the command.
+        """
         pass
 
     @abstractmethod
     def disable_output(self, monitor_name: str):
-        """Disables a specific output."""
+        """Disables a specific output. Raises WMCommandError on rejection."""
         pass
 
     @abstractmethod
@@ -59,9 +70,16 @@ class WMAdapter(ABC):
         pass
 
 
+def _validate_transform(transform: str):
+    if transform not in VALID_TRANSFORMS:
+        raise ValueError(
+            f"Invalid transform {transform!r}; must be one of {sorted(VALID_TRANSFORMS)}"
+        )
+
+
 class SwayAdapter(WMAdapter):
     """Sway implementation of WMAdapter."""
-    
+
     def __init__(self):
         try:
             self.ipc = i3ipc.Connection()
@@ -73,33 +91,29 @@ class SwayAdapter(WMAdapter):
         if not self.ipc:
             # Fallback to swaymsg if IPC fails (unlikely if Sway is running)
             return self._get_outputs_fallback()
-            
+
         outputs = self.ipc.get_outputs()
         monitors = []
         for out in outputs:
-            # i3ipc output object attributes might vary slightly, 
+            # i3ipc output object attributes might vary slightly,
             # ensuring safe access.
             make = getattr(out, 'make', 'Unknown')
             model = getattr(out, 'model', 'Unknown')
             serial = getattr(out, 'serial', 'Unknown')
-            
-            # If IPC doesn't provide EDID info directly in early versions, 
-            # we might need to parse it or fallback. 
-            # But standardized i3ipc should have it.
-            
+
             rect = out.rect
             current_mode = out.current_mode
-            
+
             width = rect.width
             height = rect.height
-            refresh = 60.0 # Default
-            
+            refresh = 60.0  # Default
+
             if current_mode:
-                 # i3ipc returns mode object
-                 width = current_mode.width
-                 height = current_mode.height
-                 refresh = current_mode.refresh / 1000.0
-            
+                # i3ipc returns mode object
+                width = current_mode.width
+                height = current_mode.height
+                refresh = current_mode.refresh / 1000.0
+
             monitors.append(Monitor(
                 name=out.name,
                 make=make,
@@ -111,12 +125,15 @@ class SwayAdapter(WMAdapter):
                 scale=out.scale if out.scale else 1.0,
                 active=out.active,
                 pos_x=rect.x,
-                pos_y=rect.y
+                pos_y=rect.y,
+                transform=getattr(out, 'transform', None) or "normal",
             ))
         return monitors
 
     def _get_outputs_fallback(self) -> List[Monitor]:
-        """Fallback using swaymsg CLI."""
+        """Fallback using swaymsg CLI. Raises WMCommandError if swaymsg itself
+        cannot be reached at all (caller should treat this as WM-not-running,
+        not as "zero monitors")."""
         try:
             result = subprocess.run(
                 ["swaymsg", "-t", "get_outputs"],
@@ -136,15 +153,20 @@ class SwayAdapter(WMAdapter):
                     scale=out.get("scale", 1.0),
                     active=out.get("active", False),
                     pos_x=out.get("rect", {}).get("x", 0),
-                    pos_y=out.get("rect", {}).get("y", 0)
+                    pos_y=out.get("rect", {}).get("y", 0),
+                    transform=out.get("transform") or "normal",
                 ))
             return monitors
-        except Exception as e:
-            print(f"Fallback swaymsg failed: {e}", file=sys.stderr)
-            return []
+        except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as e:
+            raise WMCommandError(f"Cannot query sway outputs (is sway running?): {e}") from e
 
-    def enable_output(self, monitor_name: str, mode: str, position: str, scale: float = 1.0):
-        cmd = f"output {monitor_name} enable mode {mode} pos {position} scale {scale}"
+    def enable_output(self, monitor_name: str, mode: str, position: str,
+                       scale: float = 1.0, transform: str = "normal"):
+        _validate_transform(transform)
+        cmd = (
+            f"output {monitor_name} enable mode {mode} pos {position} "
+            f"scale {scale} transform {transform}"
+        )
         self._run_command(cmd)
 
     def disable_output(self, monitor_name: str):
@@ -155,29 +177,58 @@ class SwayAdapter(WMAdapter):
         self._run_command("reload")
 
     def _run_command(self, command: str):
+        """Runs a sway command and raises WMCommandError if sway rejects it.
+
+        sway's IPC command reply is a list of {"success": bool, "error": str}
+        objects, one per semicolon-separated sub-command. Previously this
+        fired-and-forgot -- a rejected command (bad mode, bad transform,
+        monitor gone) failed completely silently.
+        """
         if self.ipc:
-            self.ipc.command(command)
+            try:
+                replies = self.ipc.command(command)
+            except Exception as e:
+                raise WMCommandError(f"sway IPC command failed: {command!r}: {e}") from e
+            errors = [
+                getattr(r, 'error', None) for r in replies
+                if not getattr(r, 'success', True)
+            ]
+            if errors:
+                raise WMCommandError(
+                    f"sway rejected command {command!r}: {'; '.join(e for e in errors if e)}"
+                )
         else:
-            subprocess.run(["swaymsg", command], check=False)
+            result = subprocess.run(["swaymsg", command], capture_output=True, text=True)
+            if result.returncode != 0:
+                raise WMCommandError(
+                    f"swaymsg rejected command {command!r}: {result.stderr.strip()}"
+                )
 
 
 class HyprlandAdapter(WMAdapter):
-    """Hyprland implementation of WMAdapter (Stub/Basic)."""
-    
+    """Hyprland implementation of WMAdapter (Stub/Basic) -- NOT YET FUNCTIONAL.
+
+    Intentionally raises NotImplementedError from WMFactory rather than being
+    instantiated silently; see WMFactory.create_adapter().
+    """
+
     def get_outputs(self) -> List[Monitor]:
         # TODO: Implement hyprctl monitors -j parsing
-        return []
+        raise NotImplementedError("Hyprland support is not yet implemented")
 
-    def enable_output(self, monitor_name: str, mode: str, position: str, scale: float = 1.0):
-        # hyprctl keyword monitor ...
-        pass
+    def enable_output(self, monitor_name: str, mode: str, position: str,
+                       scale: float = 1.0, transform: str = "normal"):
+        # TODO: hyprctl keyword monitor ...
+        raise NotImplementedError("Hyprland support is not yet implemented")
 
     def disable_output(self, monitor_name: str):
-        # hyprctl keyword monitor ... disabled
-        pass
+        # TODO: hyprctl keyword monitor ... disabled
+        raise NotImplementedError("Hyprland support is not yet implemented")
 
     def reload_config(self):
-        subprocess.run(["hyprctl", "reload"], check=False)
+        result = subprocess.run(["hyprctl", "reload"], capture_output=True, text=True)
+        if result.returncode != 0:
+            raise WMCommandError(f"hyprctl reload failed: {result.stderr.strip()}")
 
 
 class WMFactory:
@@ -186,12 +237,21 @@ class WMFactory:
         xdg_desktop = os.environ.get("XDG_CURRENT_DESKTOP", "").lower()
         swaysock = os.environ.get("SWAYSOCK")
         hypr_sig = os.environ.get("HYPRLAND_INSTANCE_SIGNATURE")
-        
+
         if swaysock or "sway" in xdg_desktop:
             return SwayAdapter()
         elif hypr_sig or "hyprland" in xdg_desktop:
-            return HyprlandAdapter()
+            # Hyprland is detected but not yet implemented -- fail loudly
+            # instead of handing back a stub that silently no-ops every call
+            # (a Hyprland user previously got an empty monitor list and no
+            # error at all, despite the README claiming WM-agnostic support).
+            raise NotImplementedError(
+                "Hyprland support is not yet implemented (architecture is in "
+                "place in wm_adapter.HyprlandAdapter, but get_outputs/enable_output/"
+                "disable_output are unfinished). Falling back to Sway would be wrong "
+                "since you're not running Sway -- please use the legacy CLI or wait "
+                "for Hyprland support to land."
+            )
         else:
-            # Default to Sway if unknown, or raise error
-            # For now, let's assume Sway as per ezSWAYdisplay
+            # Default to Sway if unknown
             return SwayAdapter()
