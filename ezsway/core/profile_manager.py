@@ -23,6 +23,7 @@ from .errors import (
     InvalidLabelError,
     ProfileLockedError,
     ProfileNotFoundError,
+    ProfileWriteError,
     WMCommandError,
 )
 from .wm_adapter import Monitor, WMAdapter
@@ -112,6 +113,16 @@ class ProfileManager:
             with open(tmp, "w") as f:
                 json.dump(data, f, indent=2)
             tmp.replace(path)
+        except OSError as e:
+            # Every write in this class goes through this helper (or
+            # _write_atomic_text below) -- previously neither wrapped its
+            # OSError, so a disk-full/permission-denied condition during
+            # any profile write (save/rename/lock/backup/restore, plus
+            # .current) raised a bare OSError past every `except
+            # EzSwayError` handler in the GUI/TUI/CLI, crashing instead of
+            # showing the clean error message this error hierarchy exists
+            # to guarantee.
+            raise ProfileWriteError(f"Failed to write {path}: {e}") from e
         finally:
             if tmp.exists():
                 with contextlib.suppress(OSError):
@@ -125,9 +136,19 @@ class ProfileManager:
         except json.JSONDecodeError:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             corrupt_path = path.with_name(f"{path.name}.corrupt-{timestamp}")
-            with contextlib.suppress(OSError):
+            try:
                 path.rename(corrupt_path)
-            logger.warning("Profile %s was corrupted; moved aside to %s", path.name, corrupt_path)
+            except OSError as rename_err:
+                # Don't claim success in the log if the rename itself
+                # failed (e.g. permission denied on the parent dir) --
+                # previously this was unconditionally logged as "moved
+                # aside to X" even when X was never actually created.
+                logger.warning(
+                    "Profile %s was corrupted and could not be moved aside: %s",
+                    path.name, rename_err,
+                )
+            else:
+                logger.warning("Profile %s was corrupted; moved aside to %s", path.name, corrupt_path)
             return None
         except OSError as e:
             logger.warning("Failed to read profile %s: %s", path, e)
@@ -239,9 +260,24 @@ class ProfileManager:
                 if not entry.get("active", True):
                     try:
                         self.wm.disable_output(live.name)
-                        result.applied.append(uid)
                     except WMCommandError as e:
                         result.failed.append({"unique_id": uid, "error": str(e)})
+                        continue
+                    # Verified like the enable path below -- previously this
+                    # branch marked `applied` unconditionally the instant
+                    # disable_output() didn't raise, with no check that the
+                    # output was actually off afterward. A sway refusal to
+                    # go below its minimum-active-output floor (or any other
+                    # silent no-op) would report success while the monitor
+                    # stayed lit, the exact opposite of what was saved.
+                    if self._verify_disabled(uid):
+                        result.applied.append(uid)
+                    else:
+                        result.failed.append({
+                            "unique_id": uid,
+                            "error": "Command accepted but output was still active "
+                                     "(verified after re-query).",
+                        })
                     continue
 
                 try:
@@ -286,6 +322,8 @@ class ProfileManager:
         try:
             tmp.write_text(text)
             tmp.replace(path)
+        except OSError as e:
+            raise ProfileWriteError(f"Failed to write {path}: {e}") from e
         finally:
             if tmp.exists():
                 with contextlib.suppress(OSError):
@@ -305,6 +343,14 @@ class ProfileManager:
                 return True
         return False
 
+    def _verify_disabled(self, unique_id: str) -> bool:
+        for _ in range(_APPLY_VERIFY_RETRIES):
+            time.sleep(_APPLY_VERIFY_DELAY_SECONDS)
+            live = next((m for m in self.wm.get_outputs() if m.unique_id == unique_id), None)
+            if live is None or not live.active:
+                return True
+        return False
+
     def rename_profile(self, old: str, new: str) -> None:
         old = validate_label(old)
         new = validate_label(new)
@@ -321,7 +367,12 @@ class ProfileManager:
             self._write_atomic(new_path, data)
             old_path.unlink()
             if self.get_current_label() == old:
-                self.current_path.write_text(new)
+                # Atomic like every other write in this class (load_profile
+                # uses _write_atomic_text for the identical file) -- a raw
+                # write_text() here could leave .current truncated/corrupted
+                # on a crash mid-write during exactly the rename that's
+                # supposed to keep it pointing at the right label.
+                self._write_atomic_text(self.current_path, new)
             logger.info("Renamed profile %r -> %r", old, new)
 
     def remove_profile(self, label: str) -> None:
@@ -357,9 +408,20 @@ class ProfileManager:
             src = self._profile_path(label)
             if not src.exists():
                 raise ProfileNotFoundError(f"No such profile: {label!r}")
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            # Microsecond precision (not just seconds) plus an explicit
+            # collision-avoidance loop as defense-in-depth: two backups of
+            # the same profile within the same second used to compute an
+            # identical backup_id and silently clobber each other via
+            # copy2() -- exactly the snapshot this feature exists to
+            # preserve, lost with no warning.
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             backup_id = f"{label}__{timestamp}"
             dest = self.backups_dir / f"{backup_id}.json"
+            suffix = 1
+            while dest.exists():
+                backup_id = f"{label}__{timestamp}_{suffix}"
+                dest = self.backups_dir / f"{backup_id}.json"
+                suffix += 1
             shutil.copy2(src, dest)  # copy2 preserves the locked flag as data + mtime
             logger.info("Backed up profile %r -> %s", label, backup_id)
             return backup_id

@@ -72,7 +72,15 @@ class MainWindow(QMainWindow):
     def open_arrange_canvas(self):
         dialog = ArrangeCanvas(self.manager.wm, self.profile_manager, parent=self)
         dialog.exec()
-        self.refresh_list()
+        # Wrapped like every other refresh_list() call site in this file --
+        # this one was the exception, so a WM IPC drop while the Arrange
+        # Displays dialog was open (sway restart, session change) crashed
+        # the whole app on close instead of showing the same QMessageBox
+        # every other refresh failure produces.
+        try:
+            self.refresh_list()
+        except EzSwayError as e:
+            QMessageBox.warning(self, "Error", f"Failed to refresh the display list: {e}")
         self.profile_panel.refresh()
 
     def run_policy(self):

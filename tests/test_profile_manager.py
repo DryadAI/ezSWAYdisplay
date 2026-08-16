@@ -15,6 +15,7 @@ from ezsway.core.errors import (
     InvalidLabelError,
     ProfileLockedError,
     ProfileNotFoundError,
+    ProfileWriteError,
 )
 from ezsway.core.profile_manager import ProfileManager, validate_label
 from ezsway.core.wm_adapter import Monitor, WMAdapter
@@ -52,6 +53,8 @@ class FakeWMAdapter(WMAdapter):
 
     def disable_output(self, monitor_name):
         self.disable_calls.append(monitor_name)
+        if not self.apply_is_effective:
+            return
         for m in self._monitors.values():
             if m.name == monitor_name:
                 m.active = False
@@ -138,6 +141,26 @@ class TestSaveLoadRoundTrip(TestProfileManagerBase):
         # is distinguishable from "was already there".
         m.pos_x, m.pos_y = 0, 0
         self.wm.apply_is_effective = False
+
+        result = self.pm.load_profile("work")
+        self.assertFalse(result.ok)
+        self.assertEqual(result.failed[0]["unique_id"], m.unique_id)
+
+    def test_load_marks_ineffective_disable_as_failed(self):
+        """Regression test: the disable branch used to mark `applied`
+        unconditionally as soon as disable_output() didn't raise, with no
+        check that the output was actually off afterward -- the disable-side
+        equivalent of the enable-side bug this tool exists to catch (e.g.
+        sway refusing to go below its minimum-active-output floor would
+        report success while the monitor stayed lit)."""
+        m = make_monitor(active=True)
+        self.wm = FakeWMAdapter([m])
+        self.pm = ProfileManager(self.wm, config_dir=Path(self.tmpdir))
+        m.active = False
+        self.pm.save_profile("work", self.wm.get_outputs())  # saves active=False
+
+        m.active = True  # simulate it being on again before load
+        self.wm.apply_is_effective = False  # disable_output() will be a no-op
 
         result = self.pm.load_profile("work")
         self.assertFalse(result.ok)
@@ -282,6 +305,27 @@ class TestBackupRestore(TestProfileManagerBase):
         profiles = self.pm.list_profiles()
         self.assertEqual(profiles[0]["label"], "work")
 
+    def test_backup_collision_gets_distinct_id_not_overwritten(self):
+        """Regression test: two backups computed in the same instant used to
+        get an identical backup_id (second-precision timestamp) and the
+        second shutil.copy2() would silently clobber the first, losing a
+        snapshot with no warning -- exactly the thing this feature exists to
+        preserve."""
+        self.pm.save_profile("work", self.wm.get_outputs())
+
+        from unittest.mock import patch as mock_patch
+        import ezsway.core.profile_manager as pm_module
+
+        fixed_now = pm_module.datetime(2026, 1, 1, 12, 0, 0, 123456)
+        with mock_patch.object(pm_module, "datetime") as mock_dt:
+            mock_dt.now.return_value = fixed_now
+            first_id = self.pm.backup_profile("work")
+            second_id = self.pm.backup_profile("work")
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertTrue((self.pm.backups_dir / f"{first_id}.json").exists())
+        self.assertTrue((self.pm.backups_dir / f"{second_id}.json").exists())
+
     def test_restore_nonexistent_backup_raises(self):
         with self.assertRaises(ProfileNotFoundError):
             self.pm.restore_backup("nope__20260101_000000")
@@ -315,7 +359,9 @@ class TestAtomicWrite(TestProfileManagerBase):
         # Simulate a write failure partway through by making json.dump blow up
         from unittest.mock import patch as mock_patch
         with mock_patch("ezsway.core.profile_manager.json.dump", side_effect=OSError("disk full")):
-            with self.assertRaises(OSError):
+            # ProfileWriteError, not a bare OSError -- _write_atomic wraps
+            # it so GUI/TUI/CLI `except EzSwayError` handlers can catch it.
+            with self.assertRaises(ProfileWriteError):
                 self.pm.save_profile("work", self.wm.get_outputs())
 
         # Live file must be untouched -- atomic write means a failed write

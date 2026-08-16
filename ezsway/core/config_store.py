@@ -71,6 +71,13 @@ class ConfigStore:
             tmp_file.replace(self.config_file)
         except OSError as e:
             raise ConfigStoreError(f"Failed to save config to {self.config_file}: {e}") from e
+        except (TypeError, ValueError) as e:
+            # This method's own docstring promises "Raises ConfigStoreError
+            # on any failure" -- only OSError was actually caught, so a
+            # non-serializable value ever ending up in monitors_db (a
+            # TypeError from json.dump) would propagate unwrapped past
+            # every `except EzSwayError` handler in the app.
+            raise ConfigStoreError(f"Failed to serialize config for {self.config_file}: {e}") from e
         finally:
             if tmp_file.exists():
                 try:

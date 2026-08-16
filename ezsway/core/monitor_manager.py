@@ -74,25 +74,47 @@ class MonitorManager:
                 try:
                     # Use the monitor's own detected mode, not the literal
                     # string "preferred" -- sway has no such mode keyword.
+                    # transform is passed too -- previously omitted here (and
+                    # in activate_monitor below), which would silently reset
+                    # a rotated monitor back to "normal" orientation on
+                    # every fail-safe activation / reactivation.
                     self.wm.enable_output(
                         m.name,
                         mode=f"{m.width}x{m.height}",
                         position="0 0",
+                        transform=m.transform,
                     )
-                    self.config_store.set_monitor_config(m.unique_id, {
-                        "active": True,
-                        "mode": f"{m.width}x{m.height}",
-                    })
-                except (WMCommandError, ConfigStoreError) as e:
-                    # ConfigStoreError (e.g. disk full/permission denied on
-                    # monitors.json) used to be uncaught here, since this
-                    # branch only handled WMCommandError -- it would
-                    # propagate out of enforce_policy() entirely, skipping
-                    # step 3 below and leaving other unknown monitors
-                    # active, violating the policy's own "default deny".
+                except WMCommandError as e:
                     logger.error(f"Fail-safe activation of {m.name} failed: {e}")
                 else:
+                    # The enable itself succeeded -- reflect that in memory
+                    # and keep this monitor out of step 3's disable loop
+                    # *regardless* of whether persisting it as "known"
+                    # below succeeds. Getting this wrong either way is bad:
+                    # leaving `m.active` stale (False) let step 3 silently
+                    # skip a monitor that was actually now on-screen but
+                    # untracked; but naively letting a config_store failure
+                    # fall into step 3's disable loop would immediately turn
+                    # back off the one monitor fail-safe exists to keep on,
+                    # defeating the whole point of "ensure at least one
+                    # monitor remains active" on a disk-full/permission
+                    # error. If persistence fails, the monitor stays
+                    # genuinely active-but-"unknown" -- next enforce_policy()
+                    # run will see it as an active unknown monitor and just
+                    # keep it as the fail-safe pick again (self-healing),
+                    # not re-attempt activation or disable it.
+                    m.active = True
                     unknown_monitors.remove(m)
+                    try:
+                        self.config_store.set_monitor_config(m.unique_id, {
+                            "active": True,
+                            "mode": f"{m.width}x{m.height}",
+                        })
+                    except ConfigStoreError as e:
+                        logger.error(
+                            f"Fail-safe activation of {m.name} succeeded but "
+                            f"failed to persist as known: {e}"
+                        )
 
         # 3. Disable the rest of unknown monitors
         for m in unknown_monitors:
@@ -141,6 +163,7 @@ class MonitorManager:
             mode=f"{target.width}x{target.height}",
             position=f"{target.pos_x} {target.pos_y}",
             scale=target.scale,
+            transform=target.transform,
         )
         self.config_store.set_monitor_config(unique_id, config)
         logger.info(f"Activated monitor {target.name}")

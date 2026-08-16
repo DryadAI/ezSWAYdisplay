@@ -45,3 +45,8 @@ class WMNotSupportedError(EzSwayError):
 class MonitorNotFoundError(EzSwayError):
     """Raised when a referenced monitor unique_id isn't among currently
     connected outputs."""
+
+
+class ProfileWriteError(EzSwayError):
+    """Raised when writing a profile or its .current pointer to disk fails
+    (disk full, permission denied, etc.)."""

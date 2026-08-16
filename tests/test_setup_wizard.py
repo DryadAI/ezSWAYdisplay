@@ -31,6 +31,21 @@ class TestDefaultFingerprint(unittest.TestCase):
     def test_empty_monitor_list_falls_back(self):
         self.assertEqual(default_fingerprint_label([]), "default")
 
+    def test_all_inactive_falls_back_to_hardware_not_generic_default(self):
+        """Regression test: if the monitor list is non-empty but every
+        monitor happens to be reported inactive (e.g. right after
+        enforce_policy() default-denied everything), this used to collapse
+        to the literal "default" label -- so two completely different
+        physical machines hitting this transitional state would silently
+        overwrite the same profile. Must fall back to fingerprinting ALL
+        monitors, not the generic string."""
+        m1 = make_monitor(name="DP-1", make="Dell", model="A", active=False)
+        m2 = make_monitor(name="DP-2", make="LG", model="B", active=False)
+        fp = default_fingerprint_label([m1, m2])
+        self.assertNotEqual(fp, "default")
+        self.assertIn("Dell", fp)
+        self.assertIn("LG", fp)
+
 
 class TestSetupWizard(unittest.TestCase):
     def setUp(self):

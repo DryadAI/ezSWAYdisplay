@@ -23,11 +23,23 @@ logger = logging.getLogger(__name__)
 def default_fingerprint_label(monitors: List[Monitor]) -> str:
     """Same style of hardware fingerprint used elsewhere in this ecosystem
     (sorted Make_Model, joined) -- used as the default label when the user
-    doesn't supply one."""
-    parts = sorted(
+    doesn't supply one.
+
+    Falls back to fingerprinting ALL detected monitors (not just active
+    ones) if none happen to be active -- e.g. right after enforce_policy()
+    has default-denied every unknown monitor, where the monitor list is
+    non-empty but every entry currently reports active=False. Without this,
+    every such transitional state on any machine collapsed to the same
+    literal "default" label, so two unrelated hardware configurations could
+    silently overwrite the same profile.
+    """
+    active_parts = sorted(
         f"{m.make}_{m.model}".replace(" ", "_") for m in monitors if m.active
     )
-    return "_".join(parts) or "default"
+    if active_parts:
+        return "_".join(active_parts)
+    all_parts = sorted(f"{m.make}_{m.model}".replace(" ", "_") for m in monitors)
+    return "_".join(all_parts) or "default"
 
 
 class SetupWizard:
