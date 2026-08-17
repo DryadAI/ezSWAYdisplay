@@ -59,15 +59,31 @@ fi
 
 log "Installing dependencies (this needs network access)..."
 "$VENV_DIR/bin/python3" -m pip install --quiet --upgrade pip || true
-if ! "$VENV_DIR/bin/python3" -m pip install --quiet -r "$SCRIPT_DIR/requirements.txt"; then
+if ! "$VENV_DIR/bin/python3" -m pip install --quiet -e "$SCRIPT_DIR"; then
   err "Failed to install dependencies -- check your network connection and retry."
   err "Not installing the app launcher, since it wouldn't run yet anyway."
   exit 1
 fi
 log "Dependencies installed."
 
-chmod +x "$SCRIPT_DIR/run_gui.sh" "$SCRIPT_DIR/run_tui.sh" 2>/dev/null || true
+chmod +x "$SCRIPT_DIR/run_gui.sh" "$SCRIPT_DIR/run_tui.sh" "$SCRIPT_DIR/run_auto.sh" 2>/dev/null || true
 [ -f "$SCRIPT_DIR/ezSWAYdisplay.py" ] && chmod +x "$SCRIPT_DIR/ezSWAYdisplay.py" 2>/dev/null || true
+
+# -- 2b. `ezswaydisplay` on PATH: pip's editable install (above) gives the
+# venv its own console-script binary at $VENV_DIR/bin/ezswaydisplay; symlink
+# it into ~/.local/bin so it's runnable bare, without cd'ing into the repo
+# or activating the venv. Skipped (not an error) if ~/.local/bin isn't on
+# PATH -- printing the full-path fallback in the final summary covers that.
+LOCAL_BIN="$HOME/.local/bin"
+if [ -x "$VENV_DIR/bin/ezswaydisplay" ]; then
+  mkdir -p "$LOCAL_BIN"
+  ln -sf "$VENV_DIR/bin/ezswaydisplay" "$LOCAL_BIN/ezswaydisplay"
+  if [[ ":$PATH:" == *":$LOCAL_BIN:"* ]]; then
+    log "Installed 'ezswaydisplay' command -> $LOCAL_BIN/ezswaydisplay"
+  else
+    log "Installed 'ezswaydisplay' command at $LOCAL_BIN/ezswaydisplay, but that directory isn't on your PATH yet -- add it to use the bare command."
+  fi
+fi
 
 # -- 3. .desktop launcher (only reached if the venv/deps step above succeeded) --
 mkdir -p "$DESKTOP_DIR"
@@ -137,9 +153,8 @@ log ""
 log "Install complete. Re-running this script later is safe (idempotent)."
 log "  GUI:  $SCRIPT_DIR/run_gui.sh"
 log "  TUI:  $SCRIPT_DIR/run_tui.sh"
-# cd + -m, not a bare script path -- ezsway/main.py uses relative imports
-# ("from .core.errors import ...") and raises "ImportError: attempted
-# relative import with no known parent package" if run directly, the exact
-# failure run_gui.sh/run_tui.sh switched to `-m ezsway.main` to avoid. This
-# printed instruction wasn't updated to match when those were fixed.
-log "  CLI:  (cd $SCRIPT_DIR && $VENV_DIR/bin/python3 -m ezsway.main --help)"
+if [ -x "$LOCAL_BIN/ezswaydisplay" ] && [[ ":$PATH:" == *":$LOCAL_BIN:"* ]]; then
+  log "  CLI:  ezswaydisplay --help"
+else
+  log "  CLI:  $VENV_DIR/bin/ezswaydisplay --help"
+fi
