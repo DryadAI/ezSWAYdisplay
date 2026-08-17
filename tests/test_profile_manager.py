@@ -477,5 +477,90 @@ class TestConcurrency(TestProfileManagerBase):
             lock_file.close()
 
 
+class TestFindAutoMatch(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _pm(self, monitors):
+        return ProfileManager(FakeWMAdapter(monitors), config_dir=Path(self.tmpdir))
+
+    def test_no_profiles_returns_none(self):
+        pm = self._pm([make_monitor(name="DP-1")])
+        self.assertIsNone(pm.find_auto_match())
+
+    def test_matches_profile_whose_outputs_are_all_connected(self):
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        pm = self._pm([laptop])
+        pm.save_profile("laptop-only", [laptop])
+        self.assertEqual(pm.find_auto_match(), "laptop-only")
+
+    def test_no_match_when_required_output_missing(self):
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1")
+        pm = self._pm([laptop, external])
+        pm.save_profile("both", [laptop, external])
+        # Now only the laptop is connected -- "both" needs the external too.
+        pm.wm = FakeWMAdapter([laptop])
+        self.assertIsNone(pm.find_auto_match())
+
+    def test_most_specific_profile_wins(self):
+        """Regression test for kanshi-style "most specific wins" tie-break:
+        with both a laptop-only profile and a laptop+external profile
+        saved, and both currently connected, the profile naming more
+        outputs must be preferred -- not just whichever sorts first."""
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1")
+        pm = self._pm([laptop, external])
+        pm.save_profile("laptop-only", [laptop])
+        pm.save_profile("docked", [laptop, external])
+        self.assertEqual(pm.find_auto_match(), "docked")
+
+    def test_inactive_entries_not_required(self):
+        """A profile entry saved with active=False (output was off when
+        saved) must not be treated as a hard requirement for matching --
+        only outputs the profile actually wants on."""
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1", active=False)
+        pm = self._pm([laptop, external])
+        pm.save_profile("mixed", [laptop, external])
+        # Only the laptop connected now -- the inactive external entry
+        # shouldn't block the match.
+        pm.wm = FakeWMAdapter([laptop])
+        self.assertEqual(pm.find_auto_match(), "mixed")
+
+
+class TestImportProfile(unittest.TestCase):
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.monitor = make_monitor()
+        self.wm = FakeWMAdapter([self.monitor])
+        self.pm = ProfileManager(self.wm, config_dir=Path(self.tmpdir))
+
+    def tearDown(self):
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_import_writes_profile_loadable_like_any_other(self):
+        outputs = [{
+            "unique_id": self.monitor.unique_id,
+            "name": self.monitor.name,
+            "mode": "1920x1080@60.000Hz",
+            "position": "0 0",
+            "scale": 1.0,
+            "transform": "normal",
+            "active": True,
+        }]
+        self.pm.import_profile("imported", outputs)
+        self.assertIn("imported", [p["label"] for p in self.pm.list_profiles()])
+        result = self.pm.load_profile("imported")
+        self.assertTrue(result.ok)
+
+    def test_import_validates_label(self):
+        with self.assertRaises(InvalidLabelError):
+            self.pm.import_profile("../evil", [])
+
+
 if __name__ == "__main__":
     unittest.main()
