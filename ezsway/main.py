@@ -2,6 +2,7 @@
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from .core.errors import EzSwayError
 from .core.monitor_manager import MonitorManager
@@ -120,6 +121,56 @@ def cmd_enforce(args):
     manager.enforce_policy()
 
 
+def cmd_auto(args):
+    pm = _build_profile_manager()
+    label = pm.find_auto_match()
+    if label is None:
+        print("No saved profile matches the currently connected monitors.")
+        sys.exit(1)
+    result = pm.load_profile(label)
+    print(f"Auto-matched profile {label!r}.")
+    print(f"Applied: {', '.join(result.applied) or '(none)'}")
+    if result.skipped_not_connected:
+        print(f"Skipped (not connected): {', '.join(result.skipped_not_connected)}")
+    if result.failed:
+        print("FAILED to apply:")
+        for f in result.failed:
+            print(f"  {f['unique_id']}: {f['error']}")
+        sys.exit(1)
+
+
+def cmd_import(args):
+    from .core.importer import parse_kanshi_config, parse_locations_conf, resolve_to_profile_outputs
+
+    pm = _build_profile_manager()
+    live = pm.wm.get_outputs()
+    source = Path(args.source)
+
+    if args.format == "locations":
+        parsed = parse_locations_conf(source)
+        label = args.label or source.stem
+    else:
+        profiles = parse_kanshi_config(source)
+        if not args.kanshi_profile:
+            print(f"Available kanshi profiles in {source}: {', '.join(profiles) or '(none found)'}")
+            print("Re-run with --from <profile-name>.", file=sys.stderr)
+            sys.exit(1)
+        if args.kanshi_profile not in profiles:
+            print(f"No profile named {args.kanshi_profile!r} in {source}.", file=sys.stderr)
+            sys.exit(1)
+        parsed = profiles[args.kanshi_profile]
+        label = args.label or args.kanshi_profile
+
+    outputs, unresolved = resolve_to_profile_outputs(parsed, live)
+    if not outputs:
+        print("Nothing to import -- none of this profile's monitors are currently connected.", file=sys.stderr)
+        sys.exit(1)
+    pm.import_profile(label, outputs)
+    print(f"Imported {label!r} ({len(outputs)} output(s)).")
+    if unresolved:
+        print(f"Skipped (not currently connected, could not resolve to hardware ID): {', '.join(unresolved)}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="ezswaydisplay",
@@ -171,6 +222,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.set_defaults(func=cmd_setup)
 
     sub.add_parser("enforce", help="Run the monitor-authorization policy once (headless/cron use)").set_defaults(func=cmd_enforce)
+
+    sub.add_parser("auto", help="Auto-detect and load the best-matching saved profile for "
+                                 "currently connected monitors").set_defaults(func=cmd_auto)
+
+    p = sub.add_parser("import", help="Import a saved layout from another tool's config "
+                                       "(kanshi, or this machine's old .locations format)")
+    p.add_argument("format", choices=["locations", "kanshi"])
+    p.add_argument("source", help="Path to the source config file")
+    p.add_argument("label", nargs="?", default=None, help="Profile label to save as "
+                                                            "(default: file stem, or the kanshi profile name)")
+    p.add_argument("--from", dest="kanshi_profile", default=None,
+                   help="(kanshi only) which profile block to import")
+    p.set_defaults(func=cmd_import)
 
     return parser
 

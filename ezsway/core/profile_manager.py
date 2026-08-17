@@ -265,6 +265,54 @@ class ProfileManager:
                 return self.current_path.read_text().strip() or None
         return None
 
+    def find_auto_match(self) -> Optional[str]:
+        """Picks the saved profile whose required (active) outputs are all
+        currently connected, preferring the profile naming the most outputs
+        when several match -- mirrors kanshi's own profile-selection
+        semantics ("most specific wins"). Returns None if no profile's
+        outputs are fully satisfied by what's plugged in right now (e.g.
+        first boot, or a dock nobody has a saved profile for yet).
+        """
+        connected = {m.unique_id for m in self.wm.get_outputs()}
+        if not connected:
+            return None
+        best_label, best_score = None, 0
+        for path in sorted(self.profiles_dir.glob("*.json")):
+            if path.name.startswith("."):
+                continue
+            data = self._read_profile_raw(path)
+            if data is None:
+                continue
+            required = {
+                o["unique_id"] for o in data.get("outputs", [])
+                if isinstance(o, dict) and o.get("active", True) and "unique_id" in o
+            }
+            if not required or not required.issubset(connected):
+                continue
+            if len(required) > best_score:
+                best_score = len(required)
+                best_label = data.get("label", path.stem)
+        return best_label
+
+    def import_profile(self, label: str, outputs: List[dict]) -> None:
+        """Writes a profile assembled by ezsway.core.importer from an
+        external tool's config (kanshi, the old .locations format) rather
+        than from live wm.get_outputs(). Same on-disk shape and same
+        locking/validation/atomic-write path as save_profile, so the result
+        is indistinguishable from a profile saved through the app itself.
+        """
+        label = validate_label(label)
+        with self._locked():
+            self._check_not_locked(label)
+            data = {
+                "label": label,
+                "created": datetime.now().isoformat(timespec="seconds"),
+                "locked": False,
+                "outputs": outputs,
+            }
+            self._write_atomic(self._profile_path(label), data)
+            logger.info("Imported profile %r (%d outputs)", label, len(outputs))
+
     def save_profile(self, label: str, monitors: List[Monitor]) -> None:
         label = validate_label(label)
         with self._locked():
