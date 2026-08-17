@@ -9,7 +9,7 @@ Two complementary features:
 ## Installation
 
 ```bash
-git clone https://github.com/NModlin/ezSWAYdisplay.git
+git clone https://github.com/DryadAI/ezSWAYdisplay.git
 cd ezSWAYdisplay
 ./install.sh
 ```
