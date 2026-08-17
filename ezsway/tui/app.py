@@ -12,9 +12,11 @@ from ..core.monitor_manager import MonitorManager
 from ..core.profile_manager import ProfileManager
 from ..core.setup_wizard import SetupWizard
 from ..core.wm_adapter import WMFactory
+from .arrange import run_arrange
 
 MAIN_MENU_CHOICES = [
     "Load a profile",
+    "Arrange displays (move with arrow keys)",
     "Save current layout as new profile",
     "Setup Wizard (capture current layout)",
     "Set up a new display (activate/deactivate)",
@@ -169,6 +171,9 @@ def run_tui():
                 label = _ask(questionary.text("Label (leave blank for auto):"))
                 result_label = wizard.run(label=label or None)
                 _ok(f"Saved current layout as {result_label!r}.")
+
+            elif choice == "Arrange displays (move with arrow keys)":
+                run_arrange(wm, pm)
 
             elif choice == "Set up a new display (activate/deactivate)":
                 _manage_monitors(manager)
