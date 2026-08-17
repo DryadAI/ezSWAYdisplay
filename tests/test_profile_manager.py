@@ -539,18 +539,50 @@ class TestFindAutoMatch(unittest.TestCase):
         os.utime(pm._profile_path("first"), (3000, 3000))
         self.assertEqual(pm.find_auto_match(), "first")
 
-    def test_inactive_entries_not_required(self):
-        """A profile entry saved with active=False (output was off when
-        saved) must not be treated as a hard requirement for matching --
-        only outputs the profile actually wants on."""
+    def test_inactive_entries_still_required_connected(self):
+        """A profile entry saved with active=False (e.g. a laptop panel the
+        profile explicitly keeps off) still needs its hardware connected
+        for the profile to match -- explicitly accounting for an output,
+        even to disable it, is part of what the profile is *for*, not
+        something to ignore. Regression test for the inverse of the old
+        (wrong) behavior: a laptop-off profile must not match once the
+        laptop itself is gone."""
         laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
-        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1", active=False)
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1")
         pm = self._pm([laptop, external])
         pm.save_profile("mixed", [laptop, external])
-        # Only the laptop connected now -- the inactive external entry
-        # shouldn't block the match.
-        pm.wm = FakeWMAdapter([laptop])
-        self.assertEqual(pm.find_auto_match(), "mixed")
+        # Only the external is connected now -- 'mixed' explicitly lists
+        # the laptop too (even though inactive), so it must NOT match.
+        pm.wm = FakeWMAdapter([external])
+        self.assertIsNone(pm.find_auto_match())
+
+    def test_explicitly_disabled_output_counts_toward_specificity(self):
+        """Regression test for the actual live bug this fix closes: a
+        profile that explicitly disables the laptop panel (2 listed
+        outputs: dock active + laptop disabled) must score AT LEAST as
+        specific as a profile that simply doesn't mention the laptop
+        differently (2 listed, both active) -- not lose to it just because
+        the old scoring only counted active entries."""
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1")
+        pm = self._pm([laptop, external])
+        pm.save_profile("laptop_off", [laptop, external])
+        # Patch the laptop entry to active=False, mirroring a real saved
+        # "keep the panel off" profile (save_profile always captures the
+        # monitor's live active state, so this simulates it having been
+        # off at save time).
+        path = pm._profile_path("laptop_off")
+        data = json.loads(path.read_text())
+        for o in data["outputs"]:
+            if o["unique_id"] == laptop.unique_id:
+                o["active"] = False
+        path.write_text(json.dumps(data))
+        os.utime(path, (5000, 5000))
+
+        pm.save_profile("both_on", [laptop, external])
+        os.utime(pm._profile_path("both_on"), (1000, 1000))  # older -- shouldn't matter, same score
+
+        self.assertEqual(pm.find_auto_match(), "laptop_off")
 
 
 class TestImportProfile(unittest.TestCase):

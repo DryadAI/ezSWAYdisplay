@@ -266,19 +266,31 @@ class ProfileManager:
         return None
 
     def find_auto_match(self) -> Optional[str]:
-        """Picks the saved profile whose required (active) outputs are all
-        currently connected, preferring the profile naming the most outputs
-        when several match -- mirrors kanshi's own profile-selection
-        semantics ("most specific wins"). Returns None if no profile's
-        outputs are fully satisfied by what's plugged in right now (e.g.
-        first boot, or a dock nobody has a saved profile for yet).
+        """Picks the saved profile whose outputs are all currently
+        connected, preferring the profile naming the most outputs when
+        several match -- mirrors kanshi's own profile-selection semantics
+        ("most specific wins"). Returns None if no profile's outputs are
+        fully satisfied by what's plugged in right now (e.g. first boot, or
+        a dock nobody has a saved profile for yet).
+
+        Specificity counts every *listed* output, not just active ones --
+        found live when a profile that explicitly disables the laptop
+        panel (2 listed outputs: dock active, laptop disabled) lost every
+        time to a profile that just doesn't mention the laptop at all
+        differently (2 listed, both active) purely because the old scoring
+        only counted active entries, so the laptop-off profile scored as if
+        it only cared about 1 output. Explicitly accounting for an output
+        (even to turn it off) is more specific than not mentioning it,
+        not less -- and it should also gate the match: a profile can't
+        apply if hardware it explicitly references (active or not) isn't
+        even connected right now.
 
         Ties (same output count) break on most-recently-modified -- found
-        live when two 2-output profiles both matched and the previous
-        alphabetical-first tie-break picked a same-day throwaway capture
-        over the actually-intended one just because its filename sorted
-        first. Recency is a much better proxy for "which one you meant"
-        than filename order, which was never a deliberate choice.
+        live when two profiles tied and the previous alphabetical-filename
+        tie-break picked a same-day throwaway capture over the actually-
+        intended one just because its filename sorted first. Recency is a
+        much better proxy for "which one you meant" than filename order,
+        which was never a deliberate choice.
         """
         connected = {m.unique_id for m in self.wm.get_outputs()}
         if not connected:
@@ -290,13 +302,13 @@ class ProfileManager:
             data = self._read_profile_raw(path)
             if data is None:
                 continue
-            required = {
+            listed = {
                 o["unique_id"] for o in data.get("outputs", [])
-                if isinstance(o, dict) and o.get("active", True) and "unique_id" in o
+                if isinstance(o, dict) and "unique_id" in o
             }
-            if not required or not required.issubset(connected):
+            if not listed or not listed.issubset(connected):
                 continue
-            score = len(required)
+            score = len(listed)
             if score < best_score:
                 continue
             mtime = path.stat().st_mtime
