@@ -8,6 +8,7 @@ session.
 import questionary
 
 from ..core.errors import EzSwayError
+from ..core.monitor_manager import MonitorManager
 from ..core.profile_manager import ProfileManager
 from ..core.setup_wizard import SetupWizard
 from ..core.wm_adapter import WMFactory
@@ -16,6 +17,7 @@ MAIN_MENU_CHOICES = [
     "Load a profile",
     "Save current layout as new profile",
     "Setup Wizard (capture current layout)",
+    "Set up a new display (activate/deactivate)",
     "Rename a profile",
     "Remove a profile",
     "Lock a profile",
@@ -84,10 +86,49 @@ def _list_profiles(pm: ProfileManager):
     print()
 
 
+def _manage_monitors(manager: MonitorManager):
+    """Lets you activate a new/unknown monitor (the default-deny policy
+    disables anything it hasn't seen before) or deactivate a known one --
+    the TUI's counterpart to the GUI's per-monitor activate/deactivate
+    buttons, which this app has had since the policy was built but never
+    exposed here."""
+    monitors = manager.refresh_monitors()
+    if not monitors:
+        _error("No monitors detected.")
+        return
+
+    def describe(m):
+        known = manager.config_store.is_known(m.unique_id)
+        status = []
+        status.append("known" if known else "unknown")
+        status.append("active" if m.active else "inactive")
+        return f"{m.name} ({m.make} {m.model} {m.serial}) - {', '.join(status)}"
+
+    choices = [describe(m) for m in monitors]
+    monitor_map = dict(zip(choices, monitors))
+    answer = _ask(questionary.select("Which display?", choices=choices + ["(cancel)"]))
+    if answer is None or answer == "(cancel)":
+        return
+
+    m = monitor_map[answer]
+    known = manager.config_store.is_known(m.unique_id)
+    action = "Deactivate" if (known and m.active) else "Activate"
+    if not _ask(questionary.confirm(f"{action} {m.name}?", default=True)):
+        return
+
+    if action == "Activate":
+        manager.activate_monitor(m.unique_id)
+        _ok(f"Activated {m.name}.")
+    else:
+        manager.deactivate_monitor(m.unique_id)
+        _ok(f"Deactivated {m.name}.")
+
+
 def run_tui():
     wm = WMFactory.create_adapter()
     pm = ProfileManager(wm)
     wizard = SetupWizard(wm, pm)
+    manager = MonitorManager()
 
     if wizard.is_first_run():
         print("No profiles saved yet -- let's capture your current layout.")
@@ -128,6 +169,9 @@ def run_tui():
                 label = _ask(questionary.text("Label (leave blank for auto):"))
                 result_label = wizard.run(label=label or None)
                 _ok(f"Saved current layout as {result_label!r}.")
+
+            elif choice == "Set up a new display (activate/deactivate)":
+                _manage_monitors(manager)
 
             elif choice == "Rename a profile":
                 old = _pick_label(pm, "Rename which profile?")
