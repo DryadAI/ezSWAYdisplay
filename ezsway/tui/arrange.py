@@ -17,8 +17,15 @@ from ..core.errors import EzSwayError
 from ..core.profile_manager import ProfileManager, verify_output_state
 from ..core.wm_adapter import Monitor, WMAdapter
 
-_SNAP_THRESHOLD = 40  # real pixels
 _STEP_SIZES = (10, 40, 160)
+# Must be strictly less than the smallest step size above. Found live: with
+# threshold == the default step (40px), a monitor sitting flush against a
+# neighbor (the normal case for an adjacent layout, not an edge case) could
+# never actually move -- every keypress moved it exactly `step` pixels away,
+# which lands exactly at the snap threshold, and (>=/<= being inclusive)
+# immediately snapped it right back to where it started. Every single
+# keypress silently no-op'd; nothing was wrong with key handling at all.
+_SNAP_THRESHOLD = 8
 
 
 def compute_snap(moved_uid: str, positions: Dict[str, Tuple[int, int]],
@@ -128,7 +135,16 @@ def _curses_loop(stdscr, wm, pm, monitors, positions, sizes, order):
     stdscr.keypad(True)
     selected = 0
     step_idx = 1
-    status = "Arrow keys move -- Tab select -- [/] step size -- a apply -- w save -- q quit"
+    # hjkl (vi-style) are the primary movement keys, not arrows: curses is
+    # entered *after* questionary/prompt_toolkit has already run in this
+    # same process, and prompt_toolkit's terminal-mode handoff was found
+    # (live, via a tmux-driven key-by-key test) to break ncurses' escape-
+    # sequence timing/assembly for multi-byte arrow keys specifically --
+    # single ASCII keys (like 'q', already relied on for quit) aren't
+    # affected. Arrow keys are still handled as a bonus for terminals/
+    # setups where they do work, but hjkl is what's documented and
+    # guaranteed.
+    status = "hjkl move (arrows may also work) -- Tab select -- [/] step size -- a apply -- w save -- q quit"
 
     while True:
         stdscr.erase()
@@ -155,13 +171,13 @@ def _curses_loop(stdscr, wm, pm, monitors, positions, sizes, order):
         key = stdscr.getch()
         uid = order[selected]
         step = _STEP_SIZES[step_idx]
-        if key in (curses.KEY_LEFT,):
+        if key in (curses.KEY_LEFT, ord('h')):
             positions[uid] = (positions[uid][0] - step, positions[uid][1])
-        elif key in (curses.KEY_RIGHT,):
+        elif key in (curses.KEY_RIGHT, ord('l')):
             positions[uid] = (positions[uid][0] + step, positions[uid][1])
-        elif key in (curses.KEY_UP,):
+        elif key in (curses.KEY_UP, ord('k')):
             positions[uid] = (positions[uid][0], positions[uid][1] - step)
-        elif key in (curses.KEY_DOWN,):
+        elif key in (curses.KEY_DOWN, ord('j')):
             positions[uid] = (positions[uid][0], positions[uid][1] + step)
         elif key == ord('\t'):
             selected = (selected + 1) % len(order)

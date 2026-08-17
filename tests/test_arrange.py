@@ -4,7 +4,7 @@ import unittest
 
 sys.path.append(os.getcwd())
 
-from ezsway.tui.arrange import apply_positions, compute_snap, _fit_scale
+from ezsway.tui.arrange import apply_positions, compute_snap, _fit_scale, _SNAP_THRESHOLD, _STEP_SIZES
 
 from tests.test_profile_manager import FakeWMAdapter, make_monitor
 
@@ -36,6 +36,27 @@ class TestComputeSnap(unittest.TestCase):
         dx, dy = compute_snap("a", positions, sizes, threshold=40)
         self.assertEqual(dx, -8)
         self.assertEqual(dy, -5)
+
+
+class TestSnapThresholdVsStepSize(unittest.TestCase):
+    """Regression test for a real live bug: with the snap threshold equal
+    to (or greater than) a step size, a monitor sitting flush against a
+    neighbor -- the ordinary case for an adjacent layout, not an edge case
+    -- could never actually move via that step: each keypress moved it
+    exactly `step` px away, landing exactly at the snap threshold, which
+    immediately snapped it right back. Every keypress silently no-op'd."""
+
+    def test_no_step_size_can_self_cancel_via_snap(self):
+        self.assertLess(_SNAP_THRESHOLD, min(_STEP_SIZES))
+
+    def test_moving_one_step_away_from_flush_neighbor_does_not_snap_back(self):
+        sizes = {"a": (1920, 1080), "b": (1080, 1920)}
+        for step in _STEP_SIZES:
+            # "a" and "b" start flush (a's right edge == b's left edge),
+            # then "a" moves `step` px further away in the same direction.
+            positions = {"a": (0, 0), "b": (1920 + step, 0)}
+            dx, dy = compute_snap("b", positions, sizes)
+            self.assertEqual((dx, dy), (0, 0), f"step={step} caused a snap-back")
 
 
 class TestApplyPositions(unittest.TestCase):
