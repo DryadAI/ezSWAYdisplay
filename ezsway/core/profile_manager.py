@@ -272,11 +272,18 @@ class ProfileManager:
         semantics ("most specific wins"). Returns None if no profile's
         outputs are fully satisfied by what's plugged in right now (e.g.
         first boot, or a dock nobody has a saved profile for yet).
+
+        Ties (same output count) break on most-recently-modified -- found
+        live when two 2-output profiles both matched and the previous
+        alphabetical-first tie-break picked a same-day throwaway capture
+        over the actually-intended one just because its filename sorted
+        first. Recency is a much better proxy for "which one you meant"
+        than filename order, which was never a deliberate choice.
         """
         connected = {m.unique_id for m in self.wm.get_outputs()}
         if not connected:
             return None
-        best_label, best_score = None, 0
+        best_label, best_score, best_mtime = None, 0, -1.0
         for path in sorted(self.profiles_dir.glob("*.json")):
             if path.name.startswith("."):
                 continue
@@ -289,8 +296,12 @@ class ProfileManager:
             }
             if not required or not required.issubset(connected):
                 continue
-            if len(required) > best_score:
-                best_score = len(required)
+            score = len(required)
+            if score < best_score:
+                continue
+            mtime = path.stat().st_mtime
+            if score > best_score or mtime > best_mtime:
+                best_score, best_mtime = score, mtime
                 best_label = data.get("label", path.stem)
         return best_label
 

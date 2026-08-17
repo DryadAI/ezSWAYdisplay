@@ -518,6 +518,27 @@ class TestFindAutoMatch(unittest.TestCase):
         pm.save_profile("docked", [laptop, external])
         self.assertEqual(pm.find_auto_match(), "docked")
 
+    def test_tie_break_prefers_most_recently_modified(self):
+        """Regression test for a real live bug: two profiles requiring the
+        identical output set (an intentional layout, and an unlabeled
+        throwaway capture saved later) tied on output count, and the old
+        alphabetical-filename tie-break picked whichever sorted first --
+        not the one actually intended -- silently applying the wrong
+        layout. mtime is a much better proxy for "which one you meant"."""
+        laptop = make_monitor(name="eDP-1", make="Dell", model="L1", serial="LS1")
+        external = make_monitor(name="DP-1", make="Dell", model="E1", serial="ES1")
+        pm = self._pm([laptop, external])
+        pm.save_profile("first", [laptop, external])
+        pm.save_profile("second", [laptop, external])
+        # Explicit, unambiguous mtimes -- not relying on real wall-clock
+        # deltas surviving filesystem mtime granularity.
+        os.utime(pm._profile_path("first"), (1000, 1000))
+        os.utime(pm._profile_path("second"), (2000, 2000))
+        self.assertEqual(pm.find_auto_match(), "second")
+
+        os.utime(pm._profile_path("first"), (3000, 3000))
+        self.assertEqual(pm.find_auto_match(), "first")
+
     def test_inactive_entries_not_required(self):
         """A profile entry saved with active=False (output was off when
         saved) must not be treated as a hard requirement for matching --
