@@ -17,7 +17,7 @@ from ezsway.core.errors import (
     ProfileNotFoundError,
     ProfileWriteError,
 )
-from ezsway.core.profile_manager import ProfileManager, validate_backup_id, validate_label
+from ezsway.core.profile_manager import ProfileManager, validate_backup_id, validate_label, verify_output_state
 from ezsway.core.wm_adapter import Monitor, WMAdapter
 
 
@@ -475,6 +475,39 @@ class TestConcurrency(TestProfileManagerBase):
         finally:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
             lock_file.close()
+
+
+class TestVerifyOutputStateScaleTransform(unittest.TestCase):
+    """want_scale/want_transform were added so a scale or rotation change
+    gets the same real re-query verification as a position change --
+    previously verify_output_state only checked mode/position, so a caller
+    changing scale/transform had no way to confirm the WM actually applied
+    it, not just accepted the IPC command."""
+
+    def test_matching_scale_and_transform_verified(self):
+        m = make_monitor(name="DP-1")
+        m.scale, m.transform = 1.5, "90"
+        wm = FakeWMAdapter([m])
+        self.assertTrue(verify_output_state(wm, m.unique_id, want_scale=1.5, want_transform="90",
+                                             retries=1, delay=0))
+
+    def test_mismatched_scale_not_verified(self):
+        m = make_monitor(name="DP-1")
+        m.scale = 1.0
+        wm = FakeWMAdapter([m])
+        self.assertFalse(verify_output_state(wm, m.unique_id, want_scale=2.0, retries=1, delay=0))
+
+    def test_mismatched_transform_not_verified(self):
+        m = make_monitor(name="DP-1")
+        m.transform = "normal"
+        wm = FakeWMAdapter([m])
+        self.assertFalse(verify_output_state(wm, m.unique_id, want_transform="180", retries=1, delay=0))
+
+    def test_scale_close_enough_within_float_tolerance_verified(self):
+        m = make_monitor(name="DP-1")
+        m.scale = 1.2999999523162842  # real float32-ish drift seen from live sway data
+        wm = FakeWMAdapter([m])
+        self.assertTrue(verify_output_state(wm, m.unique_id, want_scale=1.3, retries=1, delay=0))
 
 
 class TestFindAutoMatch(unittest.TestCase):

@@ -9,14 +9,15 @@ import questionary
 
 from ..core.errors import EzSwayError
 from ..core.monitor_manager import MonitorManager
-from ..core.profile_manager import ProfileManager
+from ..core.profile_manager import ProfileManager, verify_output_state
 from ..core.setup_wizard import SetupWizard
-from ..core.wm_adapter import WMFactory
+from ..core.wm_adapter import VALID_TRANSFORMS, WMFactory
 from .arrange import run_arrange
 
 MAIN_MENU_CHOICES = [
     "Load a profile",
     "Arrange displays (move with arrow keys)",
+    "Edit display settings (scale/rotation)",
     "Save current layout as new profile",
     "Setup Wizard (capture current layout)",
     "Set up a new display (activate/deactivate)",
@@ -126,6 +127,62 @@ def _manage_monitors(manager: MonitorManager):
         _ok(f"Deactivated {m.name}.")
 
 
+def _edit_display_settings(wm):
+    """Lets you change a connected monitor's scale or transform (rotation).
+    The arrange screens (GUI drag canvas, TUI arrow-key screen) only ever
+    exposed position -- scale/transform were only changeable by hand-editing
+    a profile JSON or dropping to raw swaymsg. Position and mode are left
+    untouched (not what this screen is for)."""
+    try:
+        monitors = wm.get_outputs()
+    except EzSwayError as e:
+        _error(f"Cannot query displays: {e}")
+        return
+    if not monitors:
+        _error("No displays detected.")
+        return
+
+    choices = [f"{m.name} ({m.make} {m.model} {m.serial}) - scale {m.scale}, transform {m.transform}"
+               for m in monitors]
+    monitor_map = dict(zip(choices, monitors))
+    answer = _ask(questionary.select("Which display?", choices=choices + ["(cancel)"]))
+    if answer is None or answer == "(cancel)":
+        return
+    m = monitor_map[answer]
+
+    scale_str = _ask(questionary.text(f"Scale (current {m.scale}):", default=str(m.scale)))
+    if scale_str is None:
+        return
+    try:
+        new_scale = float(scale_str)
+    except ValueError:
+        _error(f"Invalid scale {scale_str!r} -- must be a number.")
+        return
+
+    transform_choices = sorted(VALID_TRANSFORMS)
+    new_transform = _ask(questionary.select(
+        f"Transform (current {m.transform}):",
+        choices=transform_choices,
+        default=m.transform if m.transform in transform_choices else transform_choices[0],
+    ))
+    if new_transform is None:
+        return
+
+    mode = f"{int(m.width)}x{int(m.height)}"
+    position = f"{m.pos_x} {m.pos_y}"
+    try:
+        wm.enable_output(m.name, mode=mode, position=position, scale=new_scale, transform=new_transform)
+    except EzSwayError as e:
+        _error(str(e))
+        return
+
+    if verify_output_state(wm, m.unique_id, want_wh=mode, want_pos=position,
+                            want_scale=new_scale, want_transform=new_transform):
+        _ok(f"Updated {m.name}: scale={new_scale}, transform={new_transform!r}.")
+    else:
+        _error(f"Command accepted but {m.name} did not verify applied (checked scale + transform too).")
+
+
 def run_tui():
     wm = WMFactory.create_adapter()
     pm = ProfileManager(wm)
@@ -174,6 +231,9 @@ def run_tui():
 
             elif choice == "Arrange displays (move with arrow keys)":
                 run_arrange(wm, pm)
+
+            elif choice == "Edit display settings (scale/rotation)":
+                _edit_display_settings(wm)
 
             elif choice == "Set up a new display (activate/deactivate)":
                 _manage_monitors(manager)
