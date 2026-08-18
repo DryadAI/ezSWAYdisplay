@@ -49,15 +49,21 @@ class LoadResult:
 
 
 def verify_output_state(wm: WMAdapter, unique_id: str, *, want_wh: Optional[str] = None,
-                         want_pos: Optional[str] = None, want_disabled: bool = False,
+                         want_pos: Optional[str] = None, want_scale: Optional[float] = None,
+                         want_transform: Optional[str] = None, want_disabled: bool = False,
                          retries: int = _APPLY_VERIFY_RETRIES,
                          delay: float = _APPLY_VERIFY_DELAY_SECONDS) -> bool:
     """Polls wm.get_outputs() up to `retries` times, confirming a monitor
     actually reached the requested state -- a sway IPC "success: true" reply
     does not guarantee the change actually took effect (the class of bug
     this whole tool exists to catch). Shared between ProfileManager
-    (save/load) and the GUI's drag-and-drop ArrangeCanvas.Apply, which
-    previously reimplemented "call enable_output" without this check at all.
+    (save/load), the GUI's drag-and-drop ArrangeCanvas.Apply, and the TUI's
+    display-settings editor.
+
+    want_scale/want_transform added alongside want_wh/want_pos so a
+    scale/rotation change gets the same real verification as a position
+    change -- checking only mode/position would have silently reported
+    success on a scale or transform change that the WM actually rejected.
 
     A WM-unreachable blip during the poll itself is treated as "try again
     next retry", not a hard failure -- a transient IPC drop while polling
@@ -80,6 +86,10 @@ def verify_output_state(wm: WMAdapter, unique_id: str, *, want_wh: Optional[str]
         if want_wh is not None and f"{int(live.width)}x{int(live.height)}" != want_wh:
             continue
         if want_pos is not None and f"{live.pos_x} {live.pos_y}" != want_pos:
+            continue
+        if want_scale is not None and abs(live.scale - want_scale) > 1e-6:
+            continue
+        if want_transform is not None and live.transform != want_transform:
             continue
         return True
     return False

@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 sys.path.append(os.getcwd())
 
-from ezsway.tui.app import _ask, _manage_monitors
+from ezsway.tui.app import _ask, _edit_display_settings, _manage_monitors
 
 
 class TestAskEofHandling(unittest.TestCase):
@@ -95,6 +95,57 @@ class TestManageMonitors(unittest.TestCase):
         ]):
             _manage_monitors(self.manager)
         self.manager.activate_monitor.assert_not_called()
+
+
+class TestEditDisplaySettings(unittest.TestCase):
+    """Regression coverage for the previously-missing way to change a
+    monitor's scale or rotation -- the arrange screens (GUI drag canvas,
+    TUI arrow-key screen) only ever exposed position; scale/transform were
+    only changeable by hand-editing a profile JSON or raw swaymsg."""
+
+    def setUp(self):
+        self.wm = MagicMock()
+        self.mon = _fake_monitor(name="DP-1", active=True)
+        self.mon.scale = 1.0
+        self.mon.transform = "normal"
+        self.mon.width, self.mon.height = 1920, 1080
+        self.mon.pos_x, self.mon.pos_y = 0, 0
+        self.wm.get_outputs.return_value = [self.mon]
+
+    def test_no_displays_shows_error_and_asks_nothing(self):
+        self.wm.get_outputs.return_value = []
+        with patch("ezsway.tui.app._ask") as mock_ask:
+            _edit_display_settings(self.wm)
+        mock_ask.assert_not_called()
+        self.wm.enable_output.assert_not_called()
+
+    def test_full_flow_applies_new_scale_and_transform(self):
+        answers = ["DP-1 (Dell M1 S1) - scale 1.0, transform normal", "1.5", "90"]
+        with patch("ezsway.tui.app._ask", side_effect=answers), \
+             patch("ezsway.tui.app.verify_output_state", return_value=True) as mock_verify:
+            _edit_display_settings(self.wm)
+        self.wm.enable_output.assert_called_once_with(
+            "DP-1", mode="1920x1080", position="0 0", scale=1.5, transform="90")
+        mock_verify.assert_called_once()
+        self.assertEqual(mock_verify.call_args.kwargs["want_scale"], 1.5)
+        self.assertEqual(mock_verify.call_args.kwargs["want_transform"], "90")
+
+    def test_cancel_at_monitor_selection_takes_no_action(self):
+        with patch("ezsway.tui.app._ask", side_effect=["(cancel)"]):
+            _edit_display_settings(self.wm)
+        self.wm.enable_output.assert_not_called()
+
+    def test_invalid_scale_rejected_before_any_wm_call(self):
+        answers = ["DP-1 (Dell M1 S1) - scale 1.0, transform normal", "not-a-number"]
+        with patch("ezsway.tui.app._ask", side_effect=answers):
+            _edit_display_settings(self.wm)
+        self.wm.enable_output.assert_not_called()
+
+    def test_cancel_at_transform_prompt_takes_no_action(self):
+        answers = ["DP-1 (Dell M1 S1) - scale 1.0, transform normal", "1.5", None]
+        with patch("ezsway.tui.app._ask", side_effect=answers):
+            _edit_display_settings(self.wm)
+        self.wm.enable_output.assert_not_called()
 
 
 if __name__ == "__main__":
